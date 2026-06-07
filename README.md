@@ -52,7 +52,7 @@ Options include:
 
 If you wish to compile the static binary manually:
 
-    git clone [https://github.com/hedioum/Hedioum-Pool-Tunnel.git](https://github.com/hedioum/Hedioum-Pool-Tunnel.git)
+    git clone https://github.com/hedioum/Hedioum-Pool-Tunnel.git
     cd Hedioum-Pool-Tunnel
     make build-linux
 
@@ -61,9 +61,9 @@ If you wish to compile the static binary manually:
 If you found this project helpful for maintaining a free and open internet, and you want to support further development, consider buying the team a coffee!
 
 USDT (Tether) Donation Addresses:
-- TRC20 (Tron): YOUR_TRC20_WALLET_ADDRESS_HERE
-- BEP20 (BSC): YOUR_BEP20_WALLET_ADDRESS_HERE
-- ERC20 (Ethereum): YOUR_ERC20_WALLET_ADDRESS_HERE
-- TON (The Open Network): YOUR_TON_WALLET_ADDRESS_HERE
+- TRC20 (Tron): TRhwZFoHRZ9oux4emFXTj63aib9nuC2J2J
+- BEP20 (BSC): 0x051e31cb70076854C0b62F816d5a89D3def4A22E
+- ERC20 (Ethereum): 0x051e31cb70076854C0b62F816d5a89D3def4A22E
+- TON (The Open Network): UQCqq0wYNDVhq9AXAZ5vOQ2ZgMmP6O0UTgvU1YhNeIpkUp1s
 
 Thank you for your support!
