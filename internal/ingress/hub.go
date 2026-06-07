@@ -12,6 +12,7 @@ import (
 	"github.com/hashicorp/yamux"
 	"github.com/hedioum/Hedioum-Pool-Tunnel/config"
 	"github.com/hedioum/Hedioum-Pool-Tunnel/internal/mimic"
+	"github.com/hedioum/Hedioum-Pool-Tunnel/internal/obfuscate"
 	"github.com/hedioum/Hedioum-Pool-Tunnel/internal/pool"
 )
 
@@ -46,20 +47,26 @@ func StartIranHub(cfg *config.AppConfig) {
 			}
 
 			// Perform the SSH-mimicking physical handshake (sending ONLY the auth token)
-			// The ultimate target address is omitted here, as it belongs to the logical stream layer.
 			if err := mimic.PerformClientHandshake(conn, nodeCopy.AuthToken, ""); err != nil {
 				conn.Close()
 				return nil, fmt.Errorf("ssh mimic handshake failed: %w", err)
 			}
 
-			// Wrap the authenticated, obfuscated connection in a Yamux client session
-			session, err := yamux.Client(conn, yamuxCfg)
+			// 3. Apply Advanced Obfuscation Layers! (Mirroring the Egress Server)
+			// The outbound data from Yamux flows through PadConn (injects garbage)
+			// and then XorConn (encrypts everything including the garbage) before hitting the network.
+
+			xorConn := obfuscate.NewXorConn(conn, nodeCopy.AuthToken)
+			padConn := obfuscate.NewPadConn(xorConn)
+
+			// Wrap the authenticated, fully obfuscated connection in a Yamux client session
+			session, err := yamux.Client(padConn, yamuxCfg)
 			if err != nil {
-				conn.Close()
+				padConn.Close()
 				return nil, err
 			}
 
-			// 3. Launch a custom, randomized Keep-Alive heartbeat to evade DPI periodicity checks
+			// 4. Launch a custom, randomized Keep-Alive heartbeat to evade DPI periodicity checks
 			go func(s *yamux.Session) {
 				for {
 					if s.IsClosed() {
@@ -79,10 +86,10 @@ func StartIranHub(cfg *config.AppConfig) {
 			return session, nil
 		}
 
-		// 4. Register the auto-scaling pool for this specific node
+		// 5. Register the auto-scaling pool for this specific node
 		hubManager.RegisterNode(nodeCopy, dialerFunc)
 
-		// 5. Start the local SOCKS5 listener, strictly bound to localhost
+		// 6. Start the local SOCKS5 listener, strictly bound to localhost
 		go startLocalSocksListener(nodeCopy, hubManager)
 	}
 

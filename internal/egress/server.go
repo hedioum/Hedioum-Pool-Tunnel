@@ -12,6 +12,7 @@ import (
 	"github.com/hashicorp/yamux"
 	"github.com/hedioum/Hedioum-Pool-Tunnel/config"
 	"github.com/hedioum/Hedioum-Pool-Tunnel/internal/mimic"
+	"github.com/hedioum/Hedioum-Pool-Tunnel/internal/obfuscate"
 )
 
 const (
@@ -57,7 +58,7 @@ func StartForeignDaemon(cfg *config.AppConfig) {
 	}
 }
 
-// handleIncomingConnection verifies the physical handshake or bans malicious scanners.
+// handleIncomingConnection verifies the physical handshake, proxies scanners to Decoy, or establishes the Yamux tunnel.
 func handleIncomingConnection(conn net.Conn, expectedToken string) {
 	clientIP, _, _ := net.SplitHostPort(conn.RemoteAddr().String())
 
@@ -68,36 +69,67 @@ func handleIncomingConnection(conn net.Conn, expectedToken string) {
 	}
 
 	// 2. Perform the SSH mimic handshake to authenticate the Iran Hub
-	// Note: We don't read the target address here; target comes from logical streams later.
 	_, err := mimic.PerformServerHandshake(conn, expectedToken)
 	if err != nil {
-		// Handshake failed or Auth Token mismatched (It's a scanner/bot)
-		color.Yellow("[-] Unauthorized access attempt from %s. IP banned for 2 hours.", clientIP)
-		banIP(clientIP)
+		// Handshake failed or Auth Token mismatched (It's a scanner/bot/GFW probe)
+		color.Yellow("[-] Unauthorized probe from %s. Silently routing to Decoy SSH.", clientIP)
 
-		// Optionally, we could forward to Decoy SSH here. Since we already read bytes
-		// during the handshake check, native proxying requires a buffer replayer.
-		// Dropping + Banning is the most resource-efficient protection.
-		conn.Close()
+		// DECOY SYSTEM: Do not ban immediately. Route the connection to the real OpenSSH daemon.
+		// This makes our server look exactly like a normal Linux server to any active DPI prober.
+		go proxyToDecoy(conn)
 		return
 	}
 
-	// 3. Handshake successful. Elevate the TCP connection to a Yamux multiplexed server.
+	// 3. Handshake successful. Apply Advanced Obfuscation Layers!
+	// Order is crucial: The physical network data must be decrypted (XOR) FIRST,
+	// then the padding (Garbage data) must be stripped (PadConn),
+	// before the clean data reaches Yamux.
+
+	xorConn := obfuscate.NewXorConn(conn, expectedToken)
+	padConn := obfuscate.NewPadConn(xorConn)
+
+	// 4. Elevate the cleaned, raw TCP connection to a Yamux multiplexed server.
 	yamuxCfg := yamux.DefaultConfig()
 	yamuxCfg.EnableKeepAlive = false // Hub handles custom randomized keep-alives
 	yamuxCfg.MaxStreamWindowSize = 4 * 1024 * 1024
 	yamuxCfg.StreamCloseTimeout = 3 * time.Minute
 
-	session, err := yamux.Server(conn, yamuxCfg)
+	// Pass the obfuscated PadConn, NOT the raw conn!
+	session, err := yamux.Server(padConn, yamuxCfg)
 	if err != nil {
-		conn.Close()
+		padConn.Close()
 		return
 	}
 
 	color.Green("[+] Authentic connection established from Iran Hub (%s)", clientIP)
 
-	// 4. Accept logical streams from the Hub and route them to the open internet
+	// 5. Accept logical streams from the Hub and route them to the open internet
 	go handleYamuxSession(session)
+}
+
+// proxyToDecoy silently bridges unauthorized connections to the local OpenSSH daemon.
+func proxyToDecoy(clientConn net.Conn) {
+	defer clientConn.Close()
+
+	// Dial the real SSH daemon we moved to port 2022
+	decoyConn, err := net.DialTimeout("tcp", decoySSHPrt, 5*time.Second)
+	if err != nil {
+		return
+	}
+	defer decoyConn.Close()
+
+	// Pipe traffic bidirectionally so the scanner interacts with real SSH
+	errChan := make(chan error, 2)
+	go func() {
+		_, err := io.Copy(decoyConn, clientConn)
+		errChan <- err
+	}()
+	go func() {
+		_, err := io.Copy(clientConn, decoyConn)
+		errChan <- err
+	}()
+
+	<-errChan
 }
 
 // handleYamuxSession accepts individual user streams multiplexed over the single physical link.
