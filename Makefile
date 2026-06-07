@@ -2,7 +2,7 @@
 # This Makefile automates the cross-compilation for Linux environments.
 
 BINARY_NAME=hedioum-tunnel
-MAIN_PATH=cmd/hedioum/main.go
+MAIN_PATH=./cmd/hedioum
 BUILD_DIR=bin
 
 # Linker flags:
