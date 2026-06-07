@@ -15,9 +15,9 @@ import (
 )
 
 const (
-	banDuration = 2 * time.Hour
-	decoySSHPrt = "127.0.0.1:2022"
-	dialTimeout = 10 * time.Second
+	banDuration   = 2 * time.Hour
+	decoySSHPrt   = "127.0.0.1:2022"
+	dialTimeout   = 10 * time.Second
 )
 
 var (
@@ -142,7 +142,8 @@ func handleLogicalStream(stream net.Conn) {
 	}
 
 	// 3. Dial the final destination on the open internet (e.g., youtube.com:443)
-	remoteConn, err := net.DialTimeout("tcp", targetAddr, dialTimeout)
+	// FIX: Force IPv4 Resolution and Dialing to prevent IPv6 Leaks on the foreign server
+	remoteConn, err := net.DialTimeout("tcp4", targetAddr, dialTimeout)
 	if err != nil {
 		return
 	}

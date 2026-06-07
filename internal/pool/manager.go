@@ -2,6 +2,7 @@ package pool
 
 import (
 	"errors"
+	"log"
 	"math/rand"
 	"net"
 	"sync"
@@ -174,12 +175,14 @@ func (np *NodePool) evaluateHealthAndScale() {
 
 	for _, session := range np.sessions {
 		if session.IsClosed() {
+			log.Printf("[Pool-%s] Purged dead/frozen physical connection.\n", np.Alias)
 			continue // Discard dead/frozen sessions
 		}
 
 		// Scale-Down Logic: Drop excess connections that have been idle too long
 		if len(healthySessions) >= minConnections && session.IdleTime() > dynamicIdleLimit {
 			session.Close() // Graceful teardown
+			log.Printf("[Pool-%s] Scaled DOWN: Dropped idle connection. Active: %d\n", np.Alias, len(healthySessions))
 			continue
 		}
 
@@ -213,11 +216,14 @@ func (np *NodePool) replenishPool(needed int) {
 			np.mu.Lock()
 			if len(np.sessions) < np.maxConnections {
 				np.sessions = append(np.sessions, wrappedSession)
+				log.Printf("[Pool-%s] Scaled UP: +1 connection established. Active: %d/%d\n", np.Alias, len(np.sessions), np.maxConnections)
 			} else {
 				// Pool reached its dynamic maximum limit, discard the newly dialed session
 				wrappedSession.Close()
 			}
 			np.mu.Unlock()
+		} else {
+			log.Printf("[Pool-%s] Failed to dial new connection: %v\n", np.Alias, err)
 		}
 	}
 }
