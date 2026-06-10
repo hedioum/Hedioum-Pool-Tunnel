@@ -11,7 +11,8 @@ import (
 )
 
 // AppVersion defines the current build version for the self-updater
-const AppVersion = "v0.1.0"
+// CRITICAL: This must match the GitHub Release Tag exactly (e.g., v0.3.1)
+const AppVersion = "v0.3.1"
 
 func main() {
 	resetCfg := flag.Bool("reset", false, "Wipe the current configuration database and restart the setup wizard")

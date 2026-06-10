@@ -11,7 +11,10 @@ import (
 	"os"
 	"os/exec"
 	"regexp"
+	"strings"
 	"time"
+
+	"github.com/fatih/color"
 )
 
 // GetPublicIPv4 safely resolves the server's public IPv4 address, forcing v4 transport
@@ -47,7 +50,7 @@ func GetPublicIPv4() (string, error) {
 	return string(ip), nil
 }
 
-// ChangeSSHPort edits sshd_config safely, backs it up, and restarts the service
+// ChangeSSHPort edits sshd_config safely, disables ssh.socket if present, updates UFW, and restarts the service
 func ChangeSSHPort(newPort string) error {
 	const sshdConfigPath = "/etc/ssh/sshd_config"
 	backupPath := fmt.Sprintf("%s.bak.%d", sshdConfigPath, time.Now().Unix())
@@ -78,14 +81,40 @@ func ChangeSSHPort(newPort string) error {
 		return fmt.Errorf("failed to write new sshd_config: %w", err)
 	}
 
-	// 5. Restart SSH service (handles both 'ssh' in Ubuntu and 'sshd' in RHEL)
+	// 5. Handle systemd ssh.socket overriding port 22 in modern Ubuntu systems
+	_ = exec.Command("systemctl", "stop", "ssh.socket").Run()
+	_ = exec.Command("systemctl", "disable", "ssh.socket").Run()
+
+	// 6. Handle Firewall (UFW) dynamically so the user doesn't get locked out
+	if isUFWActive() {
+		color.Yellow("[*] UFW Firewall is active. Opening new SSH port %s/tcp...", newPort)
+		if err := exec.Command("ufw", "allow", fmt.Sprintf("%s/tcp", newPort)).Run(); err != nil {
+			color.Red("[!] Warning: Failed to add UFW rule automatically. Please run 'ufw allow %s/tcp' manually.", newPort)
+		} else {
+			color.Green("[✓] UFW rule added successfully.")
+		}
+	}
+
+	// 7. Restart SSH service (handles both 'ssh' in Ubuntu and 'sshd' in RHEL)
 	cmd := exec.Command("systemctl", "restart", "ssh")
 	if err := cmd.Run(); err != nil {
 		// Fallback for CentOS/AlmaLinux
 		exec.Command("systemctl", "restart", "sshd").Run()
 	}
 
+	// Give the SSH daemon a second to bind
+	time.Sleep(1 * time.Second)
+
 	return nil
+}
+
+// isUFWActive checks if the Uncomplicated Firewall is running
+func isUFWActive() bool {
+	out, err := exec.Command("ufw", "status").Output()
+	if err != nil {
+		return false
+	}
+	return strings.Contains(string(out), "Status: active")
 }
 
 // GenerateSecureToken creates a 32-character random hex string for authentication

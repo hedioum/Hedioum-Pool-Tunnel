@@ -65,8 +65,14 @@ func LoadConfig() (*AppConfig, error) {
 	// --- Backward Compatibility & Fallback Logic ---
 	// Ensures existing deployments won't crash due to missing fields in old JSON configs.
 	for i := range cfg.ForeignNodes {
+		if cfg.ForeignNodes[i].TargetPort == 0 {
+			cfg.ForeignNodes[i].TargetPort = 22 // Default fallback for old configs
+		}
 		if cfg.ForeignNodes[i].MinConnections == 0 {
 			cfg.ForeignNodes[i].MinConnections = 10 // Default baseline: 10 connections
+		}
+		if cfg.ForeignNodes[i].MaxConnections == 0 {
+			cfg.ForeignNodes[i].MaxConnections = 20 // Default max limit
 		}
 		if cfg.ForeignNodes[i].BandwidthLimitMbps == 0 {
 			cfg.ForeignNodes[i].BandwidthLimitMbps = 8 // Default target: 8 Mbps per connection

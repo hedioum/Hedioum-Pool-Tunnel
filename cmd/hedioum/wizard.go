@@ -2,9 +2,11 @@ package main
 
 import (
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"strconv"
+	"strings"
 
 	"github.com/AlecAivazis/survey/v2"
 	"github.com/fatih/color"
@@ -83,6 +85,7 @@ func setupIranNode(cfg *config.AppConfig, isFirstTime bool) {
 	color.HiBlue("\n--- Egress Target Registration ---")
 
 	node := config.ForeignNode{}
+	suggestedSocksPort := getNextFreeSocksPort(cfg)
 
 	questions := []*survey.Question{
 		{
@@ -96,8 +99,12 @@ func setupIranNode(cfg *config.AppConfig, isFirstTime bool) {
 			Validate: survey.Required,
 		},
 		{
+			Name:   "targetport",
+			Prompt: &survey.Input{Message: "Foreign Egress Port:", Default: "22"},
+		},
+		{
 			Name:   "localsocksport",
-			Prompt: &survey.Input{Message: "Local SOCKS5 Bind Port (for X-UI Outbound mapping):", Default: "40001"},
+			Prompt: &survey.Input{Message: "Local SOCKS5 Bind Port (for X-UI Outbound mapping):", Default: suggestedSocksPort},
 		},
 		{
 			Name:   "minconnections",
@@ -125,6 +132,7 @@ func setupIranNode(cfg *config.AppConfig, isFirstTime bool) {
 	answers := struct {
 		Alias           string
 		TargetIP        string
+		TargetPort      string
 		LocalSocksPort  string
 		MinConnections  string
 		MaxConnections  string
@@ -141,11 +149,51 @@ func setupIranNode(cfg *config.AppConfig, isFirstTime bool) {
 	node.TargetIP = answers.TargetIP
 	node.AuthToken = answers.AuthToken
 
-	node.LocalSocksPort, _ = strconv.Atoi(answers.LocalSocksPort)
-	node.MinConnections, _ = strconv.Atoi(answers.MinConnections)
-	node.MaxConnections, _ = strconv.Atoi(answers.MaxConnections)
-	node.BandwidthLimitMbps, _ = strconv.Atoi(answers.BandwidthLimit)
-	node.BandwidthJitterMbps, _ = strconv.Atoi(answers.BandwidthJitter)
+	// Safely parse all integer inputs, falling back to defaults if empty or invalid (0)
+	node.TargetPort = safeAtoi(answers.TargetPort, 22)
+	node.LocalSocksPort = safeAtoi(answers.LocalSocksPort, safeAtoi(suggestedSocksPort, 40001))
+	node.MinConnections = safeAtoi(answers.MinConnections, 10)
+	node.MaxConnections = safeAtoi(answers.MaxConnections, 20)
+	node.BandwidthLimitMbps = safeAtoi(answers.BandwidthLimit, 8)
+	node.BandwidthJitterMbps = safeAtoi(answers.BandwidthJitter, 2)
 
 	cfg.UpdateForeignNode(node)
+}
+
+// --- Helper Functions ---
+
+// getNextFreeSocksPort scans existing configurations for the highest used SOCKS5 port,
+// increments it, and dynamically tests the OS to ensure the port is actually free.
+func getNextFreeSocksPort(cfg *config.AppConfig) string {
+	startPort := 40001
+	for _, node := range cfg.ForeignNodes {
+		if node.LocalSocksPort >= startPort {
+			startPort = node.LocalSocksPort + 1
+		}
+	}
+
+	// Keep testing ports until we find one that is actively free on the OS
+	for {
+		ln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", startPort))
+		if err == nil {
+			ln.Close() // The port is free, close the test listener
+			break
+		}
+		startPort++
+	}
+	return strconv.Itoa(startPort)
+}
+
+// safeAtoi parses strings to integers securely. It falls back to a provided default value
+// if the input is empty, invalid, or zero (to prevent zero-port configuration bugs).
+func safeAtoi(s string, defaultVal int) int {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return defaultVal
+	}
+	val, err := strconv.Atoi(s)
+	if err != nil || val <= 0 { // Also prevents negative values and 0
+		return defaultVal
+	}
+	return val
 }

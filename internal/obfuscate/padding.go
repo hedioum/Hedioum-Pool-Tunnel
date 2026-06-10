@@ -111,10 +111,11 @@ func (c *PadConn) Write(p []byte) (int, error) {
 		copy(c.writeBuf[headerSize:], p[totalWritten:totalWritten+chunkSize])
 
 		// Inject random garbage at the end to randomize TCP packet sizes (Length Obfuscation)
+		// OPTIMIZATION: Replaced the slow byte-by-byte loop with a single highly optimized bulk read.
 		frameEnd := headerSize + chunkSize
-		for i := 0; i < padLen; i++ {
-			// math/rand is fast and sufficient for adding noise
-			c.writeBuf[frameEnd+i] = byte(rand.Intn(256))
+		if padLen > 0 {
+			// Using math/rand.Read to fill the slice in one operation is exponentially faster
+			rand.Read(c.writeBuf[frameEnd : frameEnd+padLen])
 		}
 
 		totalFrameSize := frameEnd + padLen

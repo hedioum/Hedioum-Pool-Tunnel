@@ -2,9 +2,9 @@ package egress
 
 import (
 	"encoding/binary"
+	"fmt"
 	"io"
 	"net"
-	"strings"
 	"sync"
 	"time"
 
@@ -28,17 +28,16 @@ var (
 
 // StartForeignDaemon boots up the egress networking processes on the foreign server.
 func StartForeignDaemon(cfg *config.AppConfig) {
-	listenAddr := net.JoinHostPort("0.0.0.0", "22") // Default to port 22
+	// Dynamically bind to the configured port or fallback to 22
+	listenPort := 22
 	if cfg.ForeignListenPort != 0 {
-		listenAddr = net.JoinHostPort("0.0.0.0", string(rune(cfg.ForeignListenPort)))               // cast for formatting if needed, but simple Sprintf is safer
-		listenAddr = net.JoinHostPort("0.0.0.0", strings.TrimSpace(net.JoinHostPort("", "22")[1:])) // fallback logic handled securely
+		listenPort = cfg.ForeignListenPort
 	}
-	// Secure formatting for listen address
-	listenAddr = net.JoinHostPort("0.0.0.0", "22")
+	listenAddr := fmt.Sprintf("0.0.0.0:%d", listenPort)
 
 	listener, err := net.Listen("tcp", listenAddr)
 	if err != nil {
-		color.Red("[x] CRITICAL: Failed to bind Egress Daemon on %s. Is port 22 free? Error: %v", listenAddr, err)
+		color.Red("[x] CRITICAL: Failed to bind Egress Daemon on %s. Is port %d free? Error: %v", listenAddr, listenPort, err)
 		return
 	}
 
@@ -69,14 +68,15 @@ func handleIncomingConnection(conn net.Conn, expectedToken string) {
 	}
 
 	// 2. Perform the SSH mimic handshake to authenticate the Iran Hub
-	_, err := mimic.PerformServerHandshake(conn, expectedToken)
+	// We receive a safe ReplayConn which contains any bytes read during the failed handshake
+	replayConn, _, err := mimic.PerformServerHandshake(conn, expectedToken)
 	if err != nil {
 		// Handshake failed or Auth Token mismatched (It's a scanner/bot/GFW probe)
 		color.Yellow("[-] Unauthorized probe from %s. Silently routing to Decoy SSH.", clientIP)
 
-		// DECOY SYSTEM: Do not ban immediately. Route the connection to the real OpenSSH daemon.
-		// This makes our server look exactly like a normal Linux server to any active DPI prober.
-		go proxyToDecoy(conn)
+		// DECOY SYSTEM: Do not ban immediately. Route the ReplayConn to the real OpenSSH daemon.
+		// ReplayConn ensures the decoy receives the EXACT byte stream the scanner sent initially.
+		go proxyToDecoy(replayConn)
 		return
 	}
 
@@ -85,7 +85,8 @@ func handleIncomingConnection(conn net.Conn, expectedToken string) {
 	// then the padding (Garbage data) must be stripped (PadConn),
 	// before the clean data reaches Yamux.
 
-	xorConn := obfuscate.NewXorConn(conn, expectedToken)
+	// Note: On success, replayConn is highly optimized (just the raw conn)
+	xorConn := obfuscate.NewXorConn(replayConn, expectedToken)
 	padConn := obfuscate.NewPadConn(xorConn)
 
 	// 4. Elevate the cleaned, raw TCP connection to a Yamux multiplexed server.
@@ -117,6 +118,13 @@ func proxyToDecoy(clientConn net.Conn) {
 		return
 	}
 	defer decoyConn.Close()
+
+	// --- DECOY BANNER CONSUMPTION ---
+	// The client has already received a fake SSH banner from our mimic handshake.
+	// The real SSH daemon (Decoy) will also send its own banner as soon as we connect.
+	// If we pipe immediately, the client gets TWO banners and crashes with "Bad packet length".
+	// Therefore, we must silently consume and discard the decoy's banner first.
+	_ = mimic.ConsumeDecoyServerBanner(decoyConn)
 
 	// Pipe traffic bidirectionally so the scanner interacts with real SSH
 	errChan := make(chan error, 2)

@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"runtime"
 	"time"
 
 	"github.com/fatih/color"
@@ -29,12 +30,16 @@ type GitHubRelease struct {
 
 // SelfUpdate orchestrates a safe zero-downtime update with an automatic rollback mechanism.
 func SelfUpdate(currentVersion string) {
-	color.Cyan("[*] Checking for updates...")
+	color.Cyan("[*] Checking for updates (Timeout: 5s)...")
 
 	// 1. Fetch latest release info
-	resp, err := http.Get(repoAPI)
+	client := http.Client{
+		Timeout: 5 * time.Second,
+	}
+	resp, err := client.Get(repoAPI)
 	if err != nil {
 		color.Red("[x] Failed to contact GitHub API: %v", err)
+		color.Yellow("    (This is common on restricted networks. Ensure your server can reach GitHub).")
 		return
 	}
 	defer resp.Body.Close()
@@ -50,43 +55,49 @@ func SelfUpdate(currentVersion string) {
 		return
 	}
 
+	// 2. Detect OS Architecture to select the correct binary
+	targetAsset := "hedioum-tunnel"
+	if runtime.GOARCH == "arm64" {
+		targetAsset = "hedioum-tunnel-arm64"
+	}
+
 	var downloadURL string
 	for _, asset := range release.Assets {
-		if asset.Name == "hedioum-tunnel" {
+		if asset.Name == targetAsset {
 			downloadURL = asset.BrowserDownloadURL
 			break
 		}
 	}
 
 	if downloadURL == "" {
-		color.Red("[x] Could not find 'hedioum-tunnel' binary in the latest release.")
+		color.Red("[x] Could not find '%s' binary in the latest release.", targetAsset)
 		return
 	}
 
 	color.Yellow("[*] New version found: %s. Starting safe update...", release.TagName)
 
-	// 2. Download the new binary safely to /tmp
+	// 3. Download the new binary safely to /tmp
 	if err := downloadFile(tmpPath, downloadURL); err != nil {
 		color.Red("[x] Download failed: %v", err)
 		return
 	}
 
-	// Integrity check (ensure file is not empty)
+	// Integrity check
 	stat, err := os.Stat(tmpPath)
-	if err != nil || stat.Size() < 1024*1024 { // Assuming binary is at least 1MB
+	if err != nil || stat.Size() < 1024*1024 {
 		color.Red("[x] Downloaded file appears corrupted or too small. Aborting update.")
 		os.Remove(tmpPath)
 		return
 	}
 
-	// 3. Backup current working binary
+	// 4. Backup current working binary
 	color.Cyan("[*] Creating backup of current version...")
 	if err := os.Rename(binaryPath, backupPath); err != nil {
 		color.Red("[x] Failed to create backup: %v", err)
 		return
 	}
 
-	// 4. Install new binary
+	// 5. Install new binary
 	if err := os.Rename(tmpPath, binaryPath); err != nil {
 		color.Red("[x] Failed to deploy new binary. Rolling back...")
 		rollback()
@@ -94,12 +105,12 @@ func SelfUpdate(currentVersion string) {
 	}
 	os.Chmod(binaryPath, 0755)
 
-	// 5. Restart service and Verify
+	// 6. Restart service and Verify
 	color.Cyan("[*] Restarting daemon to apply version %s...", release.TagName)
 	exec.Command("systemctl", "restart", "hedioum.service").Run()
-	time.Sleep(2 * time.Second) // Wait for service to attempt startup
+	time.Sleep(2 * time.Second)
 
-	// 6. Health Check & Rollback
+	// 7. Health Check & Rollback
 	if err := exec.Command("systemctl", "is-active", "--quiet", "hedioum.service").Run(); err != nil {
 		color.HiRed("[!] CRITICAL: New version crashed upon startup. Initiating auto-rollback!")
 		rollback()
@@ -111,15 +122,13 @@ func SelfUpdate(currentVersion string) {
 	color.Green("\n[✓] Update successful! Hedioum Daemon is now running %s.", release.TagName)
 }
 
-// downloadFile tries the direct link, and falls back to a proxy if blocked (Anti-Censorship)
+// downloadFile tries the direct link, and falls back to a proxy if blocked
 func downloadFile(filepath string, url string) error {
-	// Try direct download via curl
 	cmd := exec.Command("curl", "-f", "-L", "-s", "-o", filepath, url)
 	if err := cmd.Run(); err == nil {
 		return nil
 	}
 
-	// Fallback to proxy
 	color.Yellow("[-] Direct download failed. Attempting via proxy fallback...")
 	proxyLink := proxyURL + url
 	cmdProxy := exec.Command("curl", "-f", "-L", "-s", "-o", filepath, proxyLink)
@@ -151,6 +160,12 @@ func Uninstall() {
 	os.Remove(binaryPath)
 	os.Remove(backupPath)
 
+	if isUFWActive() {
+		color.Yellow("[*] Removing UFW firewall rule for port 2022...")
+		exec.Command("ufw", "delete", "allow", "2022/tcp").Run()
+	}
+
 	color.Green("[✓] Hedioum has been completely removed from this system.")
+	color.HiRed("IMPORTANT: Remember to manually change your SSH port back to 22 in '/etc/ssh/sshd_config' if you moved it during installation!")
 	os.Exit(0)
 }

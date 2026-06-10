@@ -11,15 +11,21 @@ BUILD_DIR=bin
 # These reduce binary size by ~50% without affecting runtime functionality.
 LDFLAGS=-ldflags="-s -w"
 
-.PHONY: all build-linux clean fmt deps
+.PHONY: all build-linux build-linux-arm64 clean fmt deps
 
-all: build-linux
+all: build-linux build-linux-arm64
 
 build-linux: deps fmt
-	@echo "Building highly optimized Linux AMD64 binary..."
+	@echo "Building highly optimized Linux AMD64 static binary..."
 	@mkdir -p $(BUILD_DIR)
-	GOOS=linux GOARCH=amd64 go build $(LDFLAGS) -o $(BUILD_DIR)/$(BINARY_NAME) $(MAIN_PATH)
-	@echo "[✓] Build complete! Static binary is ready at: $(BUILD_DIR)/$(BINARY_NAME)"
+	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build $(LDFLAGS) -o $(BUILD_DIR)/$(BINARY_NAME) $(MAIN_PATH)
+	@echo "[✓] AMD64 Build complete! Static binary is ready at: $(BUILD_DIR)/$(BINARY_NAME)"
+
+build-linux-arm64: deps fmt
+	@echo "Building highly optimized Linux ARM64 static binary..."
+	@mkdir -p $(BUILD_DIR)
+	CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build $(LDFLAGS) -o $(BUILD_DIR)/$(BINARY_NAME)-arm64 $(MAIN_PATH)
+	@echo "[✓] ARM64 Build complete! Static binary is ready at: $(BUILD_DIR)/$(BINARY_NAME)-arm64"
 
 clean:
 	@echo "Cleaning up build artifacts..."

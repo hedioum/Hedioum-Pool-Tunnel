@@ -11,12 +11,8 @@ import (
 	"github.com/hedioum/Hedioum-Pool-Tunnel/config"
 	"github.com/hedioum/Hedioum-Pool-Tunnel/internal/egress"
 	"github.com/hedioum/Hedioum-Pool-Tunnel/internal/ingress"
-	"github.com/hedioum/Hedioum-Pool-Tunnel/internal/pool"
 	"github.com/hedioum/Hedioum-Pool-Tunnel/internal/sysutil"
 )
-
-// Global reference to the active HubManager for fetching live stats (used only on Iran Node)
-var globalHubManager *pool.HubManager
 
 // --- INTERACTIVE OPERATIONS DASHBOARD ---
 
@@ -25,10 +21,13 @@ func runInteractiveDashboard(cfg *config.AppConfig) {
 
 	for {
 		var action string
-		options := []string{
+		var options []string
+
+		// Build dynamic, sequentially numbered menu options based on role
+		options = append(options,
 			"1. Show Live Service Status & Monitoring",
 			"2. View Real-time Logs (Journalctl)",
-		}
+		)
 
 		if cfg.Role == "iran" {
 			options = append(options,
@@ -42,10 +41,10 @@ func runInteractiveDashboard(cfg *config.AppConfig) {
 		// Enterprise Features added to the bottom of the menu
 		options = append(options,
 			"----------------------------------------",
-			"5. Update Hedioum Daemon (Self-Update)",
-			"6. Uninstall & Remove Everything",
-			"0. Start Daemon Foreground (Debug)",
-			"Exit",
+			"U. Update Hedioum Daemon (Self-Update)",
+			"X. Uninstall & Remove Everything",
+			"D. Start Daemon Foreground (Debug)",
+			"0. Exit",
 		)
 
 		prompt := &survey.Select{
@@ -55,43 +54,47 @@ func runInteractiveDashboard(cfg *config.AppConfig) {
 		}
 		survey.AskOne(prompt, &action)
 
-		switch action {
-		case "1. Show Live Service Status & Monitoring":
+		// Extract the core action bypassing the dynamic prefixes
+		switch {
+		case strings.Contains(action, "Show Live Service Status"):
 			// Print clean systemd status summary
 			color.HiCyan("\n=== [ System Daemon Status ] ===")
 			runSystemCmd("systemctl", "status", "hedioum.service", "--no-pager", "-n", "0")
 
-			if cfg.Role == "iran" && len(cfg.ForeignNodes) > 0 {
-				color.HiCyan("\n=== [ Active Mesh Topologies & Live Stats ] ===")
-
-				// Attempt to connect to the local RPC or read state file in a real app,
-				// but for this CLI, we will display the configuration and guide the user.
-				// Note: Direct live memory access from CLI to Daemon requires an RPC socket.
-				// Since we haven't built the RPC socket yet, we display the structured config.
-
-				for _, n := range cfg.ForeignNodes {
-					fmt.Printf("\n 🟢 Target Alias : %s\n", color.HiWhiteString(n.Alias))
-					fmt.Printf(" ├─ Egress IP    : %s:%d\n", color.HiYellowString(n.TargetIP), n.TargetPort)
-					fmt.Printf(" ├─ Local SOCKS5 : 127.0.0.1:%d\n", n.LocalSocksPort)
-					fmt.Printf(" ├─ Pool Sizing  : %d (Warm-up) to %d (Max Peak) Connections\n", n.MinConnections, n.MaxConnections)
-					fmt.Printf(" └─ DPI Evasion  : Floating Cap %d Mbps (±%d Mbps Jitter)\n", n.BandwidthLimitMbps, n.BandwidthJitterMbps)
+			if cfg.Role == "iran" {
+				if len(cfg.ForeignNodes) > 0 {
+					color.HiCyan("\n=== [ Active Mesh Topologies & Live Stats ] ===")
+					for _, n := range cfg.ForeignNodes {
+						fmt.Printf("\n 🟢 Target Alias : %s\n", color.HiWhiteString(n.Alias))
+						fmt.Printf(" ├─ Egress IP    : %s:%d\n", color.HiYellowString(n.TargetIP), n.TargetPort)
+						fmt.Printf(" ├─ Local SOCKS5 : 127.0.0.1:%d\n", n.LocalSocksPort)
+						fmt.Printf(" ├─ Pool Sizing  : %d (Warm-up) to %d (Max Peak) Connections\n", n.MinConnections, n.MaxConnections)
+						fmt.Printf(" └─ DPI Evasion  : Floating Cap %d Mbps (±%d Mbps Jitter)\n", n.BandwidthLimitMbps, n.BandwidthJitterMbps)
+					}
+					color.Yellow("\n[*] Note: To view real-time Mbps and connection scale events, use Option 2 (Journalctl).")
+					color.Yellow("    (Live RPC Dashboard memory-link is slated for the next release).")
+				} else {
+					color.Yellow("\n[!] No active egress nodes configured. Use Option 3 to add one.")
 				}
-
-				color.Yellow("\n[*] Note: To view real-time Mbps and connection scale events, use Option 2 (Journalctl).")
-				color.Yellow("    (Live RPC Dashboard memory-link is slated for the next release).")
+			} else if cfg.Role == "foreign" {
+				// Display critical connection info for the foreign server
+				color.HiCyan("\n=== [ Egress Node Details ] ===")
+				fmt.Printf(" ├─ Listen Port : %d\n", cfg.ForeignListenPort)
+				fmt.Printf(" └─ Auth Token  : %s\n", color.HiYellowString(cfg.AuthToken))
+				color.HiBlack("    (Use this token when configuring your Iran Hub)")
 			}
 
-		case "2. View Real-time Logs (Journalctl)":
+		case strings.Contains(action, "View Real-time Logs"):
 			color.Cyan("\n[*] Tailing logs. Press Ctrl+C to return to dashboard.\n")
 			runSystemCmd("journalctl", "-u", "hedioum.service", "-f", "-n", "30")
 
-		case "3. Add New Foreign Egress Node":
+		case strings.Contains(action, "Add New Foreign Egress Node"):
 			setupIranNode(cfg, false)
 			saveAndRestart(cfg)
 
-		case "4. Remove Existing Egress Node":
+		case strings.Contains(action, "Remove Existing Egress Node"):
 			if len(cfg.ForeignNodes) == 0 {
-				color.Yellow("No egress nodes registered.")
+				color.Yellow("\n[!] No egress nodes registered.")
 				continue
 			}
 			var aliases []string
@@ -105,17 +108,17 @@ func runInteractiveDashboard(cfg *config.AppConfig) {
 				saveAndRestart(cfg)
 			}
 
-		case "3. Rotate Authentication Token":
+		case strings.Contains(action, "Rotate Authentication Token"):
 			cfg.AuthToken = sysutil.GenerateSecureToken()
 			color.Green("\n[✓] Token Rotated. New Token: %s", color.HiYellowString(cfg.AuthToken))
-			color.Red("WARNING: You must update this token on your Iran Hub immediately.")
+			color.HiRed("WARNING: You must update this token on your Iran Hub immediately.")
 			saveAndRestart(cfg)
 
-		case "5. Update Hedioum Daemon (Self-Update)":
+		case strings.Contains(action, "Update Hedioum Daemon"):
 			color.HiBlue("\n--- Core System Updater ---")
 			sysutil.SelfUpdate(AppVersion)
 
-		case "6. Uninstall & Remove Everything":
+		case strings.Contains(action, "Uninstall & Remove Everything"):
 			color.HiRed("\n--- DESTROY SYSTEM ---")
 			confirm := false
 			survey.AskOne(&survey.Confirm{
@@ -129,7 +132,7 @@ func runInteractiveDashboard(cfg *config.AppConfig) {
 				color.Green("[-] Uninstall aborted.")
 			}
 
-		case "0. Start Daemon Foreground (Debug)":
+		case strings.Contains(action, "Start Daemon Foreground"):
 			color.Magenta("\n[*] Bootstrapping Daemon in foreground. Ctrl+C to abort.")
 			if cfg.Role == "foreign" {
 				egress.StartForeignDaemon(cfg)
@@ -137,7 +140,7 @@ func runInteractiveDashboard(cfg *config.AppConfig) {
 				ingress.StartIranHub(cfg)
 			}
 
-		case "Exit":
+		case strings.Contains(action, "Exit"):
 			fmt.Println("Exiting dashboard...")
 			os.Exit(0)
 		}
