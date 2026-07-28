@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"strconv"
 	"sync/atomic"
 	"time"
 
@@ -239,43 +240,34 @@ func handleTCPStream(stream net.Conn) {
 	<-errChan
 }
 
-// handleUDPStream relays a UDP association's datagrams to the internet.
-// (Implemented in the UDP-egress step of Milestone 2.)
-func handleUDPStream(stream net.Conn) {
-	// Placeholder until the UDP relay + NAT table land; drop for now.
-}
-
 // errBlockedTarget marks a target rejected for pointing at a non-global address
 // (SSRF attempt), as opposed to an ordinary resolution/dial failure.
 var errBlockedTarget = errors.New("blocked non-global target")
 
-// safeDialTarget resolves the target host at most once, rejects any address that
-// is not a global unicast internet address, and dials the vetted IP directly.
-// Dialing the resolved IP (rather than re-resolving the hostname) closes the
-// DNS-rebinding TOCTOU. Resolution failures fail closed.
-func safeDialTarget(target string) (net.Conn, error) {
-	host, port, err := net.SplitHostPort(target)
-	if err != nil {
-		return nil, fmt.Errorf("invalid target %q: %w", target, err)
-	}
-
-	// IP literal: vet and dial directly.
+// vettedIPv4 resolves host at most once to a safe, dialable IPv4 address (or
+// returns errBlockedTarget / a resolution error). It single-sources the SSRF
+// policy for both TCP and UDP: dialing the resolved IP (rather than re-resolving)
+// closes the DNS-rebinding TOCTOU, and it fails closed on resolution errors.
+func vettedIPv4(host string) (net.IP, error) {
+	// IP literal.
 	if ip := net.ParseIP(host); ip != nil {
 		if !isDialableIP(ip) {
 			return nil, fmt.Errorf("%w %s", errBlockedTarget, host)
 		}
-		return net.DialTimeout("tcp4", net.JoinHostPort(host, port), dialTimeout)
+		if ip4 := ip.To4(); ip4 != nil {
+			return ip4, nil
+		}
+		return nil, fmt.Errorf("no IPv4 for literal %s", host) // v6 handled in the IPv6 step
 	}
 
-	// Hostname: resolve once, then dial a vetted IPv4 literal.
+	// Hostname: resolve once; reject the whole target if ANY resolved address is
+	// non-global (defends against split-horizon answers mixing public + internal).
 	ips, err := net.LookupIP(host)
 	if err != nil {
 		return nil, fmt.Errorf("resolve %s: %w", host, err)
 	}
 	var chosen net.IP
 	for _, ip := range ips {
-		// Reject the whole target if ANY resolved address is non-global (defends
-		// against split-horizon answers mixing a public and an internal IP).
 		if !isDialableIP(ip) {
 			return nil, fmt.Errorf("%w %s (%s)", errBlockedTarget, host, ip)
 		}
@@ -288,7 +280,38 @@ func safeDialTarget(target string) (net.Conn, error) {
 	if chosen == nil {
 		return nil, fmt.Errorf("no dialable IPv4 address for %s", host)
 	}
-	return net.DialTimeout("tcp4", net.JoinHostPort(chosen.String(), port), dialTimeout)
+	return chosen, nil
+}
+
+// safeDialTarget vets the TCP target and dials the exact vetted IPv4.
+func safeDialTarget(target string) (net.Conn, error) {
+	host, port, err := net.SplitHostPort(target)
+	if err != nil {
+		return nil, fmt.Errorf("invalid target %q: %w", target, err)
+	}
+	ip, err := vettedIPv4(host)
+	if err != nil {
+		return nil, err
+	}
+	return net.DialTimeout("tcp4", net.JoinHostPort(ip.String(), port), dialTimeout)
+}
+
+// safeDialUDP vets the UDP target and returns a connected UDP socket to the exact
+// vetted IPv4 (same SSRF policy as TCP; connected so only the target can reply).
+func safeDialUDP(target string) (*net.UDPConn, error) {
+	host, port, err := net.SplitHostPort(target)
+	if err != nil {
+		return nil, fmt.Errorf("invalid target %q: %w", target, err)
+	}
+	ip, err := vettedIPv4(host)
+	if err != nil {
+		return nil, err
+	}
+	p, err := strconv.Atoi(port)
+	if err != nil {
+		return nil, fmt.Errorf("invalid port %q: %w", port, err)
+	}
+	return net.DialUDP("udp4", nil, &net.UDPAddr{IP: ip, Port: p})
 }
 
 // isDialableIP reports whether ip is a public, global unicast internet address
