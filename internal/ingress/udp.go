@@ -13,7 +13,7 @@ import (
 
 const (
 	udpBufSize    = 64 * 1024 // max datagram we read from the local SOCKS client
-	udpQueueDepth = 256        // bounded outbound queue; drop when full (UDP tolerates loss)
+	udpQueueDepth = 256       // bounded outbound queue; drop when full (UDP tolerates loss)
 )
 
 // handleUDPAssociate implements SOCKS5 UDP ASSOCIATE. It opens a localhost relay
@@ -40,8 +40,8 @@ func handleUDPAssociate(ctrlConn net.Conn, nodeAlias string, hubManager *pool.Hu
 	}
 	_ = ctrlConn.SetDeadline(time.Time{}) // control conn now stays open for the association's lifetime
 
-	// 2. Open a UDP tunnel stream to the egress.
-	stream, err := hubManager.GetStream(nodeAlias)
+	// 2. Open a UDP tunnel stream on the dedicated UDP sub-pool.
+	stream, err := hubManager.GetStreamUDP(nodeAlias)
 	if err != nil {
 		return
 	}

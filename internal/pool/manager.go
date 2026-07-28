@@ -45,34 +45,37 @@ type NodePool struct {
 	shutdown       chan struct{}
 }
 
+// UDP sub-pool sizing. UDP rides a SEPARATE set of (still SSH-masked TCP)
+// physical connections so a bulk TCP download cannot head-of-line-block a
+// real-time UDP call. Kept small and hidden from user config.
+const (
+	udpMinConns = 2
+	udpMaxConns = 6
+)
+
+// nodePools holds the two isolated sub-pools for one foreign node. Both dial the
+// same egress over the identical masked TCP transport; they differ only in which
+// logical streams (TCP CONNECT vs UDP ASSOCIATE) ride them.
+type nodePools struct {
+	tcp *NodePool
+	udp *NodePool
+}
+
 // HubManager oversees all active foreign node pools in the Iran Hub.
 type HubManager struct {
-	pools map[string]*NodePool
+	pools map[string]*nodePools
 	mu    sync.RWMutex
 }
 
 // NewHubManager initializes the global pool manager for the Iran relay node.
 func NewHubManager() *HubManager {
 	return &HubManager{
-		pools: make(map[string]*NodePool),
+		pools: make(map[string]*nodePools),
 	}
 }
 
-// RegisterNode provisions a new isolated connection pool for a specific foreign server.
-func (hm *HubManager) RegisterNode(cfg config.ForeignNode, dialer DialFunc) {
-	hm.mu.Lock()
-	defer hm.mu.Unlock()
-
-	minConns := cfg.MinConnections
-	if minConns < 1 {
-		minConns = defaultMinConns
-	}
-
-	maxConns := cfg.MaxConnections
-	if maxConns < minConns {
-		maxConns = minConns + 5 // Ensure max is always reasonably higher than min
-	}
-
+// newNodePool builds and starts a monitored connection pool.
+func newNodePool(cfg config.ForeignNode, minConns, maxConns int, dialer DialFunc) *NodePool {
 	pool := &NodePool{
 		Alias:          cfg.Alias,
 		TargetIP:       cfg.TargetIP,
@@ -84,22 +87,56 @@ func (hm *HubManager) RegisterNode(cfg config.ForeignNode, dialer DialFunc) {
 		sessions:       make([]*YamuxSession, 0, maxConns),
 		shutdown:       make(chan struct{}),
 	}
-
-	hm.pools[cfg.Alias] = pool
-	go pool.monitorAndScale() // Start the dedicated watchdog for this node
+	go pool.monitorAndScale() // dedicated watchdog for this pool
+	return pool
 }
 
-// GetStream selects a physical connection using the "Least Loaded" strategy.
-func (hm *HubManager) GetStream(nodeAlias string) (net.Conn, error) {
-	hm.mu.RLock()
-	pool, exists := hm.pools[nodeAlias]
-	hm.mu.RUnlock()
+// RegisterNode provisions the isolated TCP and UDP sub-pools for a foreign server.
+func (hm *HubManager) RegisterNode(cfg config.ForeignNode, dialer DialFunc) {
+	hm.mu.Lock()
+	defer hm.mu.Unlock()
 
+	minConns := cfg.MinConnections
+	if minConns < 1 {
+		minConns = defaultMinConns
+	}
+	maxConns := cfg.MaxConnections
+	if maxConns < minConns {
+		maxConns = minConns + 5 // Ensure max is always reasonably higher than min
+	}
+
+	hm.pools[cfg.Alias] = &nodePools{
+		tcp: newNodePool(cfg, minConns, maxConns, dialer),
+		udp: newNodePool(cfg, udpMinConns, udpMaxConns, dialer),
+	}
+}
+
+// GetStreamTCP returns a least-loaded stream on the node's TCP sub-pool.
+func (hm *HubManager) GetStreamTCP(nodeAlias string) (net.Conn, error) {
+	np, err := hm.lookup(nodeAlias)
+	if err != nil {
+		return nil, err
+	}
+	return np.tcp.getStreamLeastLoaded()
+}
+
+// GetStreamUDP returns a least-loaded stream on the node's dedicated UDP sub-pool.
+func (hm *HubManager) GetStreamUDP(nodeAlias string) (net.Conn, error) {
+	np, err := hm.lookup(nodeAlias)
+	if err != nil {
+		return nil, err
+	}
+	return np.udp.getStreamLeastLoaded()
+}
+
+func (hm *HubManager) lookup(nodeAlias string) (*nodePools, error) {
+	hm.mu.RLock()
+	np, exists := hm.pools[nodeAlias]
+	hm.mu.RUnlock()
 	if !exists {
 		return nil, errors.New("foreign node pool not found")
 	}
-
-	return pool.getStreamLeastLoaded()
+	return np, nil
 }
 
 // getStreamLeastLoaded routes the new logical stream to the active physical connection handling the fewest streams.
@@ -275,32 +312,38 @@ func (np *NodePool) replenishPool(needed int) {
 	}
 }
 
-// GetStats returns aggregated telemetry for the dashboard CLI.
+// GetStats returns aggregated telemetry (TCP + UDP sub-pools) for the dashboard.
 func (hm *HubManager) GetStats(nodeAlias string) PoolStats {
-	hm.mu.RLock()
-	pool, exists := hm.pools[nodeAlias]
-	hm.mu.RUnlock()
-
-	if !exists {
+	np, err := hm.lookup(nodeAlias)
+	if err != nil {
 		return PoolStats{}
 	}
+	tcp := np.tcp.stats()
+	udp := np.udp.stats()
+	return PoolStats{
+		ActiveConns:   tcp.ActiveConns + udp.ActiveConns,
+		DrainingConns: tcp.DrainingConns + udp.DrainingConns,
+		TotalMbps:     tcp.TotalMbps + udp.TotalMbps,
+	}
+}
 
-	pool.mu.RLock()
-	defer pool.mu.RUnlock()
+// stats snapshots one pool's connection counts and bandwidth.
+func (np *NodePool) stats() PoolStats {
+	np.mu.RLock()
+	defer np.mu.RUnlock()
 
 	var active, draining int
-	for _, s := range pool.sessions {
+	for _, s := range np.sessions {
 		if s.IsActive() {
 			active++
 		} else if s.IsDraining() {
 			draining++
 		}
 	}
-
 	return PoolStats{
 		ActiveConns:   active,
 		DrainingConns: draining,
-		TotalMbps:     int(atomic.LoadInt32(&pool.currentMbps)),
+		TotalMbps:     int(atomic.LoadInt32(&np.currentMbps)),
 	}
 }
 

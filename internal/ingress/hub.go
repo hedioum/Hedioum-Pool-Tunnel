@@ -146,8 +146,8 @@ func handleClientTraffic(localConn net.Conn, nodeAlias string, hubManager *pool.
 
 // handleTCPConnect multiplexes a SOCKS5 CONNECT over a Yamux stream to the egress.
 func handleTCPConnect(localConn net.Conn, targetDest, nodeAlias string, hubManager *pool.HubManager) {
-	// Request a multiplexed logical stream from the auto-scaling connection pool.
-	stream, err := hubManager.GetStream(nodeAlias)
+	// Request a multiplexed logical stream from the TCP sub-pool.
+	stream, err := hubManager.GetStreamTCP(nodeAlias)
 	if err != nil {
 		// Pool temporarily exhausted or dead: drop; X-UI/Xray core retries.
 		return
