@@ -6,13 +6,13 @@ import (
 	"io"
 	"math/rand"
 	"net"
+	"strconv"
 	"time"
 
 	"github.com/fatih/color"
 	"github.com/hashicorp/yamux"
 	"github.com/hedioum/Hedioum-Pool-Tunnel/config"
 	"github.com/hedioum/Hedioum-Pool-Tunnel/internal/mimic"
-	"github.com/hedioum/Hedioum-Pool-Tunnel/internal/obfuscate"
 	"github.com/hedioum/Hedioum-Pool-Tunnel/internal/pool"
 )
 
@@ -38,7 +38,8 @@ func StartIranHub(cfg *config.AppConfig) {
 
 		// 2. Define the dialing and physical handshake procedure for this foreign node
 		dialerFunc := func() (*yamux.Session, error) {
-			targetAddr := fmt.Sprintf("%s:%d", nodeCopy.TargetIP, nodeCopy.TargetPort)
+			// JoinHostPort handles IPv6 literals correctly (brackets), unlike "%s:%d".
+			targetAddr := net.JoinHostPort(nodeCopy.TargetIP, strconv.Itoa(nodeCopy.TargetPort))
 
 			// Dial the physical TCP connection
 			conn, err := net.DialTimeout("tcp", targetAddr, 5*time.Second)
@@ -46,23 +47,20 @@ func StartIranHub(cfg *config.AppConfig) {
 				return nil, err
 			}
 
-			// Perform the SSH-mimicking physical handshake (sending ONLY the auth token)
-			if err := mimic.PerformClientHandshake(conn, nodeCopy.AuthToken, ""); err != nil {
+			// Exchange SSH banners for camouflage, then upgrade to the authenticated
+			// ChaCha20-Poly1305 transport. The token is the pre-shared key and is
+			// never sent in the clear; it also keys the AEAD, so a passive observer
+			// sees only random salts followed by ciphertext.
+			secureConn, err := mimic.PerformClientHandshake(conn, nodeCopy.AuthToken)
+			if err != nil {
 				conn.Close()
-				return nil, fmt.Errorf("ssh mimic handshake failed: %w", err)
+				return nil, fmt.Errorf("secure handshake failed: %w", err)
 			}
 
-			// 3. Apply Advanced Obfuscation Layers! (Mirroring the Egress Server)
-			// The outbound data from Yamux flows through PadConn (injects garbage)
-			// and then XorConn (encrypts everything including the garbage) before hitting the network.
-
-			xorConn := obfuscate.NewXorConn(conn, nodeCopy.AuthToken)
-			padConn := obfuscate.NewPadConn(xorConn)
-
-			// Wrap the authenticated, fully obfuscated connection in a Yamux client session
-			session, err := yamux.Client(padConn, yamuxCfg)
+			// Wrap the authenticated, encrypted connection in a Yamux client session
+			session, err := yamux.Client(secureConn, yamuxCfg)
 			if err != nil {
-				padConn.Close()
+				secureConn.Close()
 				return nil, err
 			}
 

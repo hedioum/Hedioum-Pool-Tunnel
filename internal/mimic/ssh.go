@@ -2,8 +2,6 @@ package mimic
 
 import (
 	"bytes"
-	"crypto/rand"
-	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
@@ -11,32 +9,44 @@ import (
 	"os/exec"
 	"strings"
 	"time"
+
+	"github.com/hedioum/Hedioum-Pool-Tunnel/internal/securestream"
 )
 
 const (
 	defaultSSHBanner = "SSH-2.0-OpenSSH_8.9p1 Ubuntu-3ubuntu0.10\r\n"
-	maxPaddingLength = 64
-	minPaddingLength = 16
-	handshakeTimeout = 5 * time.Second
+	handshakeTimeout = 8 * time.Second
 )
 
 // --- Connection Wrappers for Zero-Data-Loss Proxying ---
 
-// RecorderConn intercepts and records all bytes read from the underlying connection.
+// RecorderConn intercepts and records all bytes read from the underlying
+// connection so a failed handshake can be replayed verbatim to the decoy.
+// Recording can be stopped once the peer is authenticated, so the successful
+// path does not accumulate the entire session in memory.
 type RecorderConn struct {
 	net.Conn
-	ReadBuf bytes.Buffer
+	ReadBuf   bytes.Buffer
+	recording bool
 }
 
 func (r *RecorderConn) Read(p []byte) (int, error) {
 	n, err := r.Conn.Read(p)
-	if n > 0 {
+	if n > 0 && r.recording {
 		r.ReadBuf.Write(p[:n])
 	}
 	return n, err
 }
 
-// ReplayConn wraps a net.Conn and an io.Reader to replay recorded bytes before continuing naturally.
+// Stop halts recording (and releases the recorded buffer). Called after a peer
+// authenticates so the ongoing high-speed session is not buffered.
+func (r *RecorderConn) Stop() {
+	r.recording = false
+	r.ReadBuf.Reset()
+}
+
+// ReplayConn wraps a net.Conn and an io.Reader to replay recorded bytes before
+// continuing to read from the socket naturally.
 type ReplayConn struct {
 	net.Conn
 	reader io.Reader
@@ -46,7 +56,8 @@ func (r *ReplayConn) Read(p []byte) (int, error) {
 	return r.reader.Read(p)
 }
 
-// buildReplayConn combines the recorded buffer and the original socket into a seamless stream.
+// buildReplayConn combines the recorded buffer and the original socket into a
+// seamless stream, so the decoy receives the exact bytes the scanner sent.
 func buildReplayConn(conn net.Conn, rec *RecorderConn) net.Conn {
 	replayReader := io.MultiReader(bytes.NewReader(rec.ReadBuf.Bytes()), conn)
 	return &ReplayConn{Conn: conn, reader: replayReader}
@@ -54,7 +65,8 @@ func buildReplayConn(conn net.Conn, rec *RecorderConn) net.Conn {
 
 // --- Banner Management ---
 
-// GetDynamicSSHBanner extracts local SSH version to remain indistinguishable from real OS
+// GetDynamicSSHBanner extracts the local SSH version to remain indistinguishable
+// from a real host; falls back to a sane default.
 func GetDynamicSSHBanner() string {
 	cmd := exec.Command("ssh", "-V")
 	var stderr bytes.Buffer
@@ -68,17 +80,14 @@ func GetDynamicSSHBanner() string {
 	if len(parts) > 0 {
 		return fmt.Sprintf("SSH-2.0-%s\r\n", strings.TrimSpace(parts[0]))
 	}
-
 	return defaultSSHBanner
 }
 
-// readBanner safely reads strictly up to the newline character.
-// This prevents TCP buffer over-reading which would otherwise consume the obfuscated payload.
+// readBanner safely reads strictly up to the newline character, so it never
+// over-reads into the bytes that follow the banner.
 func readBanner(conn net.Conn) (string, error) {
 	var banner []byte
 	buf := make([]byte, 1)
-
-	// Read byte-by-byte up to a sensible maximum length to prevent infinite loops
 	for i := 0; i < 255; i++ {
 		_, err := conn.Read(buf)
 		if err != nil {
@@ -92,9 +101,25 @@ func readBanner(conn net.Conn) (string, error) {
 	return string(banner), nil
 }
 
-// ConsumeDecoyServerBanner reads and discards the SSH banner from a decoy server.
-// This is vital when proxying an unauthorized scanner to the decoy, because
-// the Hedioum daemon has ALREADY sent a server banner to the scanner.
+// FetchRealSSHBanner connects to the decoy sshd and returns its exact banner
+// line. The egress presents this same banner to peers so that a real SSH client
+// routed to the decoy still completes key exchange: SSH binds the server banner
+// into the KEX hash, so a mismatched mimic banner would break admin logins
+// (both password and key auth) on the public port.
+func FetchRealSSHBanner(addr string) (string, error) {
+	conn, err := net.DialTimeout("tcp", addr, 3*time.Second)
+	if err != nil {
+		return "", err
+	}
+	defer conn.Close()
+	if err := conn.SetReadDeadline(time.Now().Add(3 * time.Second)); err != nil {
+		return "", err
+	}
+	return readBanner(conn)
+}
+
+// ConsumeDecoyServerBanner reads and discards the SSH banner from the decoy so a
+// scanner proxied to it does not receive two banners.
 func ConsumeDecoyServerBanner(conn net.Conn) error {
 	if err := conn.SetReadDeadline(time.Now().Add(2 * time.Second)); err != nil {
 		return err
@@ -106,143 +131,71 @@ func ConsumeDecoyServerBanner(conn net.Conn) error {
 
 // --- Handshake Execution ---
 
-// PerformClientHandshake sends client banner, reads server banner securely, and dispatches payload.
-func PerformClientHandshake(conn net.Conn, token string, targetAddr string) error {
+// PerformClientHandshake exchanges SSH banners for camouflage and then upgrades
+// the connection to an authenticated ChaCha20-Poly1305 stream. The token is the
+// pre-shared secret and is never transmitted in the clear.
+func PerformClientHandshake(conn net.Conn, token string) (net.Conn, error) {
 	if err := conn.SetDeadline(time.Now().Add(handshakeTimeout)); err != nil {
-		return err
+		return nil, err
 	}
 	defer conn.SetDeadline(time.Time{})
 
-	// 1. Send Client Banner
-	banner := GetDynamicSSHBanner()
-	if _, err := conn.Write([]byte(banner)); err != nil {
-		return fmt.Errorf("failed to write client banner: %w", err)
+	// 1. Exchange banners (camouflage layer).
+	if _, err := conn.Write([]byte(GetDynamicSSHBanner())); err != nil {
+		return nil, fmt.Errorf("failed to write client banner: %w", err)
 	}
-
-	// 2. Safely read Server Banner without over-consuming buffer
 	if _, err := readBanner(conn); err != nil {
-		return fmt.Errorf("failed to read server banner: %w", err)
+		return nil, fmt.Errorf("failed to read server banner: %w", err)
 	}
 
-	// 3. Construct Obfuscated Metadata Payload: [TokenLen] [Token] [TargetLen] [Target]
-	payload := new(bytes.Buffer)
-	payload.WriteByte(byte(len(token)))
-	payload.WriteString(token)
-
-	targetLenBytes := make([]byte, 2)
-	binary.BigEndian.PutUint16(targetLenBytes, uint16(len(targetAddr)))
-	payload.Write(targetLenBytes)
-	payload.WriteString(targetAddr)
-
-	// 4. Wrap Payload in RFC 4253 SSH Binary Packet Format
-	paddingLen := generateRandomInt(minPaddingLength, maxPaddingLength)
-	packetLen := uint32(1 + payload.Len() + paddingLen)
-
-	packet := new(bytes.Buffer)
-	lengthBytes := make([]byte, 4)
-	binary.BigEndian.PutUint32(lengthBytes, packetLen)
-
-	packet.Write(lengthBytes)
-	packet.WriteByte(byte(paddingLen))
-	packet.Write(payload.Bytes())
-
-	// Append cryptographically secure noise
-	randomPadding := make([]byte, paddingLen)
-	if _, err := rand.Read(randomPadding); err != nil {
-		return errors.New("failed to generate secure padding noise")
+	// 2. Upgrade to the authenticated, encrypted transport.
+	sc, err := securestream.ClientHandshake(conn, token)
+	if err != nil {
+		return nil, fmt.Errorf("secure handshake failed: %w", err)
 	}
-	packet.Write(randomPadding)
-
-	if _, err := conn.Write(packet.Bytes()); err != nil {
-		return fmt.Errorf("failed to send obfuscated metadata packet: %w", err)
-	}
-
-	return nil
+	return sc, nil
 }
 
-// PerformServerHandshake verifies client authenticity and extracts metadata securely.
-// It returns a safe ReplayConn in case of failure, allowing the caller to proxy the exact
-// unmodified client stream to a decoy server without losing the initial consumed bytes.
-func PerformServerHandshake(conn net.Conn, expectedToken string) (net.Conn, string, error) {
+// PerformServerHandshake exchanges banners, then authenticates the peer over the
+// encrypted transport. On success it returns the SecureConn. On any failure it
+// returns a ReplayConn carrying the exact bytes the peer sent, so the caller can
+// route the (likely scanner/probe) connection to the SSH decoy. filter provides
+// replay protection and may be nil.
+// serverBanner is the banner to present; when empty a synthesized banner is used.
+// For transparent decoy passthrough it should be the real sshd banner (see
+// FetchRealSSHBanner).
+func PerformServerHandshake(conn net.Conn, expectedToken string, filter *securestream.ReplayFilter, serverBanner string) (secure net.Conn, replay net.Conn, err error) {
 	if err := conn.SetDeadline(time.Now().Add(handshakeTimeout)); err != nil {
-		return conn, "", err
+		return nil, conn, err
 	}
 	defer conn.SetDeadline(time.Time{})
 
-	// Wrap the connection to record all incoming bytes from the client
-	recConn := &RecorderConn{Conn: conn}
-
-	// 1. Send Server Banner
-	banner := GetDynamicSSHBanner()
-	if _, err := conn.Write([]byte(banner)); err != nil {
-		return buildReplayConn(conn, recConn), "", fmt.Errorf("failed to write server banner: %w", err)
+	if serverBanner == "" {
+		serverBanner = GetDynamicSSHBanner()
 	}
 
-	// 2. Safely read Client Banner
-	clientBanner, err := readBanner(recConn)
+	rec := &RecorderConn{Conn: conn, recording: true}
+
+	// 1. Send our banner, then read + validate the client banner.
+	if _, err := conn.Write([]byte(serverBanner)); err != nil {
+		return nil, buildReplayConn(conn, rec), fmt.Errorf("failed to write server banner: %w", err)
+	}
+	clientBanner, err := readBanner(rec)
 	if err != nil {
-		return buildReplayConn(conn, recConn), "", fmt.Errorf("failed to read client banner: %w", err)
+		return nil, buildReplayConn(conn, rec), fmt.Errorf("failed to read client banner: %w", err)
 	}
-
 	if !strings.HasPrefix(clientBanner, "SSH-2.0") {
-		return buildReplayConn(conn, recConn), "", errors.New("invalid protocol banner signature")
+		return nil, buildReplayConn(conn, rec), errors.New("invalid protocol banner signature")
 	}
 
-	// 3. Read Obfuscated Packet Header
-	header := make([]byte, 5)
-	if _, err := io.ReadFull(recConn, header); err != nil {
-		return buildReplayConn(conn, recConn), "", errors.New("failed to read metadata packet header")
+	// 2. Authenticate over the encrypted transport. A wrong PSK (or a probe that
+	// is not speaking our protocol) fails the AEAD tag -> route to decoy.
+	sc, err := securestream.ServerHandshake(rec, expectedToken, filter)
+	if err != nil {
+		return nil, buildReplayConn(conn, rec), err
 	}
 
-	packetLen := binary.BigEndian.Uint32(header[0:4])
-	paddingLen := int(header[4])
-
-	payloadLen := int(packetLen) - 1 - paddingLen
-	if payloadLen <= 0 || payloadLen > 1024 {
-		return buildReplayConn(conn, recConn), "", errors.New("malformed obfuscated packet dimensions")
-	}
-
-	// 4. Read Payload + Padding
-	bodyBuf := make([]byte, payloadLen+paddingLen)
-	if _, err := io.ReadFull(recConn, bodyBuf); err != nil {
-		return buildReplayConn(conn, recConn), "", errors.New("failed to read obfuscated payload body")
-	}
-
-	// 5. Validate Token
-	payloadData := bodyBuf[:payloadLen]
-	tokenLen := int(payloadData[0])
-
-	if tokenLen+1 > payloadLen {
-		return buildReplayConn(conn, recConn), "", errors.New("payload bounds exceeded reading token")
-	}
-
-	receivedToken := string(payloadData[1 : 1+tokenLen])
-	if receivedToken != expectedToken {
-		return buildReplayConn(conn, recConn), "", errors.New("authentication token mismatch - rogue scanner dropped")
-	}
-
-	// 6. Extract Target
-	targetLenOffset := 1 + tokenLen
-	if targetLenOffset+2 > payloadLen {
-		return buildReplayConn(conn, recConn), "", errors.New("payload bounds exceeded reading target length")
-	}
-
-	targetLen := int(binary.BigEndian.Uint16(payloadData[targetLenOffset : targetLenOffset+2]))
-	targetStrOffset := targetLenOffset + 2
-
-	if targetStrOffset+targetLen > payloadLen {
-		return buildReplayConn(conn, recConn), "", errors.New("payload bounds exceeded reading target string")
-	}
-
-	targetAddr := string(payloadData[targetStrOffset : targetStrOffset+targetLen])
-
-	// Handshake successful! The stream is clean (metadata consumed).
-	// We return the RAW connection to avoid the overhead of the recorder for future high-speed bytes.
-	return conn, targetAddr, nil
-}
-
-func generateRandomInt(min, max int) int {
-	b := make([]byte, 1)
-	_, _ = rand.Read(b)
-	return min + int(b[0])%(max-min+1)
+	// 3. Authenticated: stop recording so the session is not buffered.
+	rec.Stop()
+	return sc, nil, nil
 }

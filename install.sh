@@ -43,7 +43,7 @@ LATEST_URL=$(curl -s https://api.github.com/repos/hedioum/Hedioum-Pool-Tunnel/re
 # Fallback URLs in case GitHub API is rate-limited or blocked
 if [ -z "$LATEST_URL" ]; then
     echo "[-] GitHub API rate-limited or blocked. Falling back to static release link..."
-    FALLBACK_VERSION="v0.3.2"
+    FALLBACK_VERSION="v0.4.0"
     LATEST_URL="https://github.com/hedioum/Hedioum-Pool-Tunnel/releases/download/${FALLBACK_VERSION}/${TARGET_ASSET}"
 fi
 
@@ -76,6 +76,26 @@ ExecStart=/usr/local/bin/hedioum-tunnel
 Restart=always
 RestartSec=5
 LimitNOFILE=1048576
+
+# --- Sandbox hardening ---
+# The daemon only needs to bind a low port, dial the network + the local decoy,
+# and read /etc/hedioum. It never modifies system files at runtime (config edits
+# happen from the interactive dashboard). Drop every capability except binding a
+# privileged port, and lock down the filesystem/kernel surface.
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/etc/hedioum
+ProtectHome=true
+PrivateTmp=true
+ProtectControlGroups=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+ProtectClock=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+LockPersonality=true
 
 [Install]
 WantedBy=multi-user.target

@@ -8,14 +8,14 @@ Hedioum Pool Tunnel is a high-performance, enterprise-grade connection multiplex
 - **DPI Evasion (Fluctuating Caps):** Implements dynamic bandwidth jitter. Each physical connection operates under a randomized, fluctuating bandwidth limit (e.g., 8 Mbps ± 2 Mbps) to break static patterns, making the tunnel indistinguishable from organic, noisy internet traffic.
 - **Zero-Downtime Connection Draining:** During scale-down events, idle physical connections are placed in a `Draining` state. They wait for active logical streams (like open socket connections) to finish naturally before closing, ensuring zero lag or disconnections for end-users.
 - **Enterprise Lifecycle Management:** Features an interactive TUI dashboard equipped with a Blue-Green Self-Updater (with automatic rollback on failure) and a Clean Uninstaller that purges all traces without leaving orphaned files.
-- **Zero Double-Encryption Overhead:** Pipes natively encrypted X-UI traffic without re-encrypting with AES, keeping CPU usage near zero on low-end servers.
-- **Protocol Mimicking:** Accurately simulates the SSH-2.0-OpenSSH handshake and binary framing, coupled with cryptographically secure random noise padding to obscure metadata.
+- **Authenticated Encryption (ChaCha20-Poly1305):** The transport is wrapped in a modern AEAD stream keyed via HKDF from your token. ChaCha20 needs no AES-NI, so overhead stays minimal on cheap/ARM VPS. The token is never sent on the wire and also keys the cipher, so a passive observer sees only random salts followed by ciphertext.
+- **Protocol Mimicking & Decoy:** Presents a real SSH-2.0 banner (mirrored byte-for-byte from the host's own `sshd`) and routes any unauthenticated probe to the real SSH daemon, so the port is indistinguishable from an ordinary SSH host. Each frame carries random padding to vary on-wire packet sizes.
 
 ## 🏗 Architecture Topology
 
 1. **X-UI (Iran):** Authenticates the user, splits domestic traffic, and forwards international traffic to the local SOCKS5 Bridge.
-2. **Hedioum Hub (Iran):** Receives the SOCKS5 payload, evaluates pool health, and multiplexes the stream (via HashiCorp Yamux) over an SSH-mimicked physical connection pool using the Chaos Mesh algorithm.
-3. **Hedioum Egress (Foreign):** Validates the SSH handshake token, enforces SSRF protections, extracts target metadata, and dials the open internet directly over forced IPv4 sockets.
+2. **Hedioum Hub (Iran):** Receives the SOCKS5 payload, evaluates pool health, and multiplexes the stream (via HashiCorp Yamux) over an authenticated, encrypted physical connection pool using the Chaos Mesh algorithm.
+3. **Hedioum Egress (Foreign):** Authenticates the Hub via the AEAD handshake (unauthenticated probes go to the SSH decoy), enforces SSRF protections (resolve-once, blocks private/link-local/CGNAT), extracts target metadata, and dials the open internet over forced IPv4 sockets.
 
 ## 🚀 Installation & Seamless Updates
 

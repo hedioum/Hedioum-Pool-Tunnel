@@ -13,8 +13,12 @@ import (
 )
 
 // AppVersion defines the current build version for the self-updater
-// CRITICAL: This must match the GitHub Release Tag exactly (e.g., v0.3.2)
-const AppVersion = "v0.3.2"
+// CRITICAL: This must match the GitHub Release Tag exactly (e.g., v0.4.0)
+//
+// v0.4.0 is a BREAKING wire-protocol change: XOR+cleartext-token was replaced by
+// an authenticated ChaCha20-Poly1305 stream. A v0.4.0 node cannot talk to an
+// older node — both the Iran Hub and the Foreign Egress must be updated together.
+const AppVersion = "v0.4.0"
 
 func main() {
 	resetCfg := flag.Bool("reset", false, "Wipe the current configuration database and restart the setup wizard")
