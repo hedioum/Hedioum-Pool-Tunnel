@@ -1,7 +1,6 @@
 package egress
 
 import (
-	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
@@ -14,6 +13,7 @@ import (
 	"github.com/hedioum/Hedioum-Pool-Tunnel/config"
 	"github.com/hedioum/Hedioum-Pool-Tunnel/internal/mimic"
 	"github.com/hedioum/Hedioum-Pool-Tunnel/internal/securestream"
+	"github.com/hedioum/Hedioum-Pool-Tunnel/internal/tunproto"
 )
 
 const (
@@ -188,28 +188,33 @@ func handleYamuxSession(session *yamux.Session) {
 	}
 }
 
-// handleLogicalStream reads the metadata (target address) and pipes data to the internet.
+// handleLogicalStream dispatches a logical stream on its leading type byte:
+// TCP CONNECT is piped to the internet; UDP ASSOCIATE is relayed as datagrams.
 func handleLogicalStream(stream net.Conn) {
 	defer stream.Close()
 
-	// 1. Read Metadata: [2 bytes Length] + [Target Address String]
-	lenBuf := make([]byte, 2)
-	if _, err := io.ReadFull(stream, lenBuf); err != nil {
+	streamType, err := tunproto.ReadStreamType(stream)
+	if err != nil {
+		return
+	}
+	switch streamType {
+	case tunproto.StreamTCP:
+		handleTCPStream(stream)
+	case tunproto.StreamUDP:
+		handleUDPStream(stream)
+	default:
+		// Unknown stream type: drop.
+	}
+}
+
+// handleTCPStream reads the target address and pipes data to the internet.
+func handleTCPStream(stream net.Conn) {
+	targetAddr, err := tunproto.ReadTCPTarget(stream)
+	if err != nil {
 		return
 	}
 
-	targetLen := binary.BigEndian.Uint16(lenBuf)
-	if targetLen == 0 || targetLen > 2048 {
-		return // Sanity check to prevent buffer overflow
-	}
-
-	targetBuf := make([]byte, targetLen)
-	if _, err := io.ReadFull(stream, targetBuf); err != nil {
-		return
-	}
-	targetAddr := string(targetBuf)
-
-	// 2. SSRF-safe dial: resolve once, vet the address, and dial that exact IP
+	// SSRF-safe dial: resolve once, vet the address, and dial that exact IP
 	// (no second lookup -> no DNS rebinding). Fails closed on resolution errors.
 	remoteConn, err := safeDialTarget(targetAddr)
 	if err != nil {
@@ -232,6 +237,12 @@ func handleLogicalStream(stream net.Conn) {
 	}()
 
 	<-errChan
+}
+
+// handleUDPStream relays a UDP association's datagrams to the internet.
+// (Implemented in the UDP-egress step of Milestone 2.)
+func handleUDPStream(stream net.Conn) {
+	// Placeholder until the UDP relay + NAT table land; drop for now.
 }
 
 // errBlockedTarget marks a target rejected for pointing at a non-global address

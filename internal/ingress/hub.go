@@ -1,7 +1,6 @@
 package ingress
 
 import (
-	"encoding/binary"
 	"fmt"
 	"io"
 	"math/rand"
@@ -14,6 +13,7 @@ import (
 	"github.com/hedioum/Hedioum-Pool-Tunnel/config"
 	"github.com/hedioum/Hedioum-Pool-Tunnel/internal/mimic"
 	"github.com/hedioum/Hedioum-Pool-Tunnel/internal/pool"
+	"github.com/hedioum/Hedioum-Pool-Tunnel/internal/tunproto"
 )
 
 // StartIranHub initializes the SOCKS5 listeners and dynamically scaling connection
@@ -140,16 +140,9 @@ func handleClientTraffic(localConn net.Conn, nodeAlias string, hubManager *pool.
 	stream := rawStream.(net.Conn)
 	defer stream.Close()
 
-	// 3. Inject the logical stream metadata (Target Address) as the very first bytes of the stream
-	targetBytes := []byte(targetDest)
-	lenBuf := make([]byte, 2)
-	binary.BigEndian.PutUint16(lenBuf, uint16(len(targetBytes)))
-
-	// Write structure: [2 bytes Metadata Length] + [Metadata String]
-	if _, err := stream.Write(lenBuf); err != nil {
-		return
-	}
-	if _, err := stream.Write(targetBytes); err != nil {
+	// 3. Announce the stream as a TCP CONNECT and inject the target address:
+	// [StreamTCP][u16 len][target]
+	if err := tunproto.WriteTCPHeader(stream, targetDest); err != nil {
 		return
 	}
 
