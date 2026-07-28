@@ -50,6 +50,30 @@ func GetPublicIPv4() (string, error) {
 	return string(ip), nil
 }
 
+// GetPublicIPv6 resolves the server's public IPv6 address, forcing v6 transport.
+// Returns an error (not a value) when the host has no usable global IPv6.
+func GetPublicIPv6() (string, error) {
+	dialer := &net.Dialer{Timeout: 5 * time.Second}
+	transport := &http.Transport{
+		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			return dialer.DialContext(ctx, "tcp6", addr)
+		},
+	}
+	client := &http.Client{Timeout: 5 * time.Second, Transport: transport}
+
+	resp, err := client.Get("https://api6.ipify.org")
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	ip, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(ip)), nil
+}
+
 // ChangeSSHPort edits sshd_config safely, disables ssh.socket if present, updates UFW, and restarts the service
 func ChangeSSHPort(newPort string) error {
 	const sshdConfigPath = "/etc/ssh/sshd_config"

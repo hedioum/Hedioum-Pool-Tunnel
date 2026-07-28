@@ -14,6 +14,11 @@ type AppConfig struct {
 	// Foreign Node specific properties
 	ForeignListenPort int    `json:"foreign_listen_port,omitempty"`
 	AuthToken         string `json:"auth_token,omitempty"`
+	// EgressIPMode controls how the foreign node dials the open internet:
+	// "ipv4" (default, no v6 identity leak), "ipv6", or "dual". EgressBindIP
+	// optionally pins the source IP on multi-IP servers.
+	EgressIPMode string `json:"egress_ip_mode,omitempty"`
+	EgressBindIP string `json:"egress_bind_ip,omitempty"`
 
 	// Iran Node specific properties
 	ForeignNodes []ForeignNode `json:"foreign_nodes,omitempty"`
@@ -64,6 +69,9 @@ func LoadConfig() (*AppConfig, error) {
 
 	// --- Backward Compatibility & Fallback Logic ---
 	// Ensures existing deployments won't crash due to missing fields in old JSON configs.
+	if cfg.Role == "foreign" && cfg.EgressIPMode == "" {
+		cfg.EgressIPMode = "ipv4" // default: no IPv6 identity leak
+	}
 	for i := range cfg.ForeignNodes {
 		if cfg.ForeignNodes[i].TargetPort == 0 {
 			cfg.ForeignNodes[i].TargetPort = 22 // Default fallback for old configs

@@ -75,6 +75,28 @@ func setupForeignNode(cfg *config.AppConfig) {
 	cfg.ForeignListenPort = 22
 	cfg.AuthToken = sysutil.GenerateSecureToken()
 
+	// IPv6 egress is opt-in (default IPv4-only to avoid leaking the v6 identity).
+	cfg.EgressIPMode = "ipv4"
+	if v6, err := sysutil.GetPublicIPv6(); err == nil && v6 != "" {
+		enableV6 := false
+		survey.AskOne(&survey.Confirm{
+			Message: fmt.Sprintf("Detected IPv6 (%s). Allow outbound traffic over IPv6 too?", v6),
+			Default: false,
+		}, &enableV6)
+		if enableV6 {
+			var mode string
+			survey.AskOne(&survey.Select{
+				Message: "Egress IP mode:",
+				Options: []string{"Dual (prefer IPv4, fall back to IPv6)", "IPv6 only"},
+			}, &mode)
+			if strings.HasPrefix(mode, "IPv6") {
+				cfg.EgressIPMode = "ipv6"
+			} else {
+				cfg.EgressIPMode = "dual"
+			}
+		}
+	}
+
 	color.HiWhite("\n[INFO] Provisioning Summary:")
 	fmt.Printf(" - Listen Port: %d\n", cfg.ForeignListenPort)
 	fmt.Printf(" - Auth Token:  %s\n", color.HiYellowString(cfg.AuthToken))
@@ -95,8 +117,8 @@ func setupIranNode(cfg *config.AppConfig, isFirstTime bool) {
 		},
 		{
 			Name:     "targetip",
-			Prompt:   &survey.Input{Message: "Foreign Egress IPv4 Address:"},
-			Validate: survey.Required,
+			Prompt:   &survey.Input{Message: "Foreign Egress IP (IPv4 or IPv6) or hostname:"},
+			Validate: validateHost,
 		},
 		{
 			Name:   "targetport",
@@ -182,6 +204,22 @@ func getNextFreeSocksPort(cfg *config.AppConfig) string {
 		startPort++
 	}
 	return strconv.Itoa(startPort)
+}
+
+// validateHost accepts a non-empty IPv4/IPv6 literal or a plausible hostname.
+func validateHost(val interface{}) error {
+	s, _ := val.(string)
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return fmt.Errorf("a value is required")
+	}
+	if net.ParseIP(s) != nil {
+		return nil // valid IPv4 or IPv6 literal
+	}
+	if strings.ContainsAny(s, " \t/\\") {
+		return fmt.Errorf("not a valid IP or hostname")
+	}
+	return nil
 }
 
 // safeAtoi parses strings to integers securely. It falls back to a provided default value

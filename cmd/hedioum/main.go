@@ -14,12 +14,13 @@ import (
 )
 
 // AppVersion defines the current build version for the self-updater
-// CRITICAL: This must match the GitHub Release Tag exactly (e.g., v0.4.0)
+// CRITICAL: This must match the GitHub Release Tag exactly (e.g., v0.5.0)
 //
-// v0.4.0 is a BREAKING wire-protocol change: XOR+cleartext-token was replaced by
-// an authenticated ChaCha20-Poly1305 stream. A v0.4.0 node cannot talk to an
-// older node — both the Iran Hub and the Foreign Egress must be updated together.
-const AppVersion = "v0.4.0"
+// v0.5.0 adds UDP (SOCKS5 UDP ASSOCIATE over the tunnel) and opt-in IPv6. It
+// carries a BREAKING wire change (a 1-byte stream type now prefixes every logical
+// stream), on top of v0.4.0's authenticated ChaCha20-Poly1305 transport. Nodes
+// must be updated together: the Iran Hub and the Foreign Egress.
+const AppVersion = "v0.5.0"
 
 func main() {
 	resetCfg := flag.Bool("reset", false, "Wipe the current configuration database and restart the setup wizard")
