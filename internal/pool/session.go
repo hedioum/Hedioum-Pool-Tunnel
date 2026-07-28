@@ -54,6 +54,15 @@ func NewYamuxSession(ys *yamux.Session, baseLimit, jitter int) *YamuxSession {
 type monitoredStream struct {
 	net.Conn
 	parent *YamuxSession
+	ctx    context.Context    // canceled when this stream closes
+	cancel context.CancelFunc // releases any in-flight rate-limit Wait
+}
+
+// Close cancels the stream context so a goroutine blocked in the rate limiter's
+// WaitN returns promptly instead of waiting out the full token delay.
+func (m *monitoredStream) Close() error {
+	m.cancel()
+	return m.Conn.Close()
 }
 
 func (m *monitoredStream) Read(b []byte) (int, error) {
@@ -69,7 +78,8 @@ func (m *monitoredStream) Read(b []byte) (int, error) {
 		if toWait > burst {
 			toWait = burst // Clamp to burst size to prevent WaitN from returning an error
 		}
-		m.parent.limiter.WaitN(context.Background(), toWait)
+		// Bound the wait to the stream's lifetime; on close WaitN returns immediately.
+		_ = m.parent.limiter.WaitN(m.ctx, toWait)
 	}
 	return n, err
 }
@@ -83,7 +93,7 @@ func (m *monitoredStream) Write(b []byte) (int, error) {
 		if toWait > burst {
 			toWait = burst
 		}
-		m.parent.limiter.WaitN(context.Background(), toWait)
+		_ = m.parent.limiter.WaitN(m.ctx, toWait)
 	}
 
 	n, err := m.Conn.Write(b)
@@ -101,7 +111,8 @@ func (ys *YamuxSession) OpenStream() (net.Conn, error) {
 		ys.lastActivity = time.Now()
 		ys.mu.Unlock()
 		// Wrap the native stream to intercept, count, and throttle traffic
-		return &monitoredStream{Conn: stream, parent: ys}, nil
+		ctx, cancel := context.WithCancel(context.Background())
+		return &monitoredStream{Conn: stream, parent: ys, ctx: ctx, cancel: cancel}, nil
 	}
 	return nil, err
 }

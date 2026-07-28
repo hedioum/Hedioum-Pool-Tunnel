@@ -9,16 +9,27 @@ import (
 	"github.com/fatih/color"
 	"github.com/hedioum/Hedioum-Pool-Tunnel/config"
 	"github.com/hedioum/Hedioum-Pool-Tunnel/internal/egress"
+	"github.com/hedioum/Hedioum-Pool-Tunnel/internal/firewall"
 	"github.com/hedioum/Hedioum-Pool-Tunnel/internal/ingress"
 )
 
 // AppVersion defines the current build version for the self-updater
-// CRITICAL: This must match the GitHub Release Tag exactly (e.g., v0.3.2)
-const AppVersion = "v0.3.2"
+// CRITICAL: This must match the GitHub Release Tag exactly (e.g., v0.4.0)
+//
+// v0.4.0 is a BREAKING wire-protocol change: XOR+cleartext-token was replaced by
+// an authenticated ChaCha20-Poly1305 stream. A v0.4.0 node cannot talk to an
+// older node — both the Iran Hub and the Foreign Egress must be updated together.
+const AppVersion = "v0.4.0"
 
 func main() {
 	resetCfg := flag.Bool("reset", false, "Wipe the current configuration database and restart the setup wizard")
+	openFW := flag.Bool("open-firewall", false, "Open the tunnel's listen port on the host firewall and exit (run privileged, e.g. from systemd ExecStartPre=+)")
 	flag.Parse()
+
+	if *openFW {
+		handleOpenFirewall()
+		return
+	}
 
 	if *resetCfg {
 		handleReset()
@@ -60,6 +71,36 @@ func main() {
 			// Fail securely if role is corrupted or undefined
 			os.Exit(1)
 		}
+	}
+}
+
+// handleOpenFirewall opens the foreign egress listen port on the host firewall.
+// It is meant to run as a privileged, short-lived step before the sandboxed
+// daemon starts. The Iran hub listens only on 127.0.0.1, so it needs no rule.
+func handleOpenFirewall() {
+	cfg, err := config.LoadConfig()
+	if err != nil {
+		color.Yellow("[-] open-firewall: no configuration yet (%v); nothing to do.", err)
+		return
+	}
+	if cfg.Role != "foreign" {
+		return
+	}
+
+	port := cfg.ForeignListenPort
+	if port == 0 {
+		port = 22
+	}
+
+	backend, err := firewall.EnsurePortOpen(port)
+	switch {
+	case err != nil:
+		color.Yellow("[-] Firewall (%s): could not open tcp/%d automatically: %v", backend, port, err)
+		color.Yellow("    Please allow tcp/%d manually if remote clients cannot connect.", port)
+	case backend == "none":
+		color.Cyan("[i] No active host firewall detected; tcp/%d needs no rule.", port)
+	default:
+		color.Green("[✓] Ensured tcp/%d is open via %s.", port, backend)
 	}
 }
 
