@@ -66,12 +66,17 @@ echo "[*] Configuring Systemd background service..."
 cat << 'EOF' > /etc/systemd/system/hedioum.service
 [Unit]
 Description=Hedioum Dynamic Pool Tunnel Daemon
-After=network.target
+# Order after ssh so the decoy sshd banner can be mirrored on boot.
+After=network.target ssh.service sshd.service
 
 [Service]
 Type=simple
 User=root
 WorkingDirectory=/etc/hedioum
+# Open the listen port on the host firewall BEFORE the sandboxed daemon starts.
+# The '+' runs this step with full privileges (outside the sandbox below), which
+# the firewall edit needs; the long-running daemon itself stays locked down.
+ExecStartPre=+/usr/local/bin/hedioum-tunnel --open-firewall
 ExecStart=/usr/local/bin/hedioum-tunnel
 Restart=always
 RestartSec=5

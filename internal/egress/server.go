@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"sync/atomic"
 	"time"
 
 	"github.com/fatih/color"
@@ -39,14 +40,9 @@ func StartForeignDaemon(cfg *config.AppConfig) {
 	color.Cyan("[i] Real SSH daemon decoy target set to %s", decoySSHPrt)
 
 	// Mirror the real sshd banner so a genuine SSH client (password or key) routed
-	// to the decoy still completes key exchange on the public port.
-	decoyBanner, err := mimic.FetchRealSSHBanner(decoySSHPrt)
-	if err != nil {
-		color.Yellow("[-] Could not read decoy SSH banner (%v). Falling back to a synthesized banner; admin SSH may fail until sshd on %s is reachable.", err, decoySSHPrt)
-		decoyBanner = ""
-	} else {
-		color.Cyan("[i] Mirroring decoy SSH banner for transparent admin access.")
-	}
+	// to the decoy still completes key exchange on the public port. Kept fresh so
+	// it survives boot races (sshd not up yet) and sshd upgrades.
+	banner := newDecoyBannerMirror(decoySSHPrt)
 
 	// Bounded, TTL'd replay protection for the authentication handshake.
 	replayFilter := securestream.NewReplayFilter(0)
@@ -57,7 +53,55 @@ func StartForeignDaemon(cfg *config.AppConfig) {
 			continue
 		}
 
-		go handleIncomingConnection(conn, cfg.AuthToken, replayFilter, decoyBanner)
+		go handleIncomingConnection(conn, cfg.AuthToken, replayFilter, banner.get())
+	}
+}
+
+// decoyBannerMirror holds the real sshd banner and keeps it up to date. SSH binds
+// the server banner into its key-exchange hash, so the egress must present the
+// exact banner the decoy sshd will use, or admin logins through the decoy break.
+type decoyBannerMirror struct {
+	v atomic.Value // string
+}
+
+func newDecoyBannerMirror(addr string) *decoyBannerMirror {
+	m := &decoyBannerMirror{}
+	m.v.Store("")
+	// Best-effort synchronous first fetch so the common case (sshd already up) has
+	// the banner ready before we accept connections.
+	if b, err := mimic.FetchRealSSHBanner(addr); err == nil && b != "" {
+		m.v.Store(b)
+		color.Cyan("[i] Mirroring decoy SSH banner for transparent admin access.")
+	} else {
+		color.Yellow("[-] Decoy SSH banner not available yet from %s; retrying in the background (admin SSH via the decoy may fail until then).", addr)
+	}
+	go m.refreshLoop(addr)
+	return m
+}
+
+// get returns the current mirrored banner ("" -> the handshake will synthesize one).
+func (m *decoyBannerMirror) get() string {
+	s, _ := m.v.Load().(string)
+	return s
+}
+
+func (m *decoyBannerMirror) refreshLoop(addr string) {
+	// Retry quickly until we have a banner (covers sshd coming up after us on boot).
+	for m.get() == "" {
+		time.Sleep(3 * time.Second)
+		if b, err := mimic.FetchRealSSHBanner(addr); err == nil && b != "" {
+			m.v.Store(b)
+			color.Cyan("[i] Mirroring decoy SSH banner for transparent admin access.")
+			break
+		}
+	}
+	// Then refresh slowly to follow sshd restarts/upgrades.
+	ticker := time.NewTicker(5 * time.Minute)
+	defer ticker.Stop()
+	for range ticker.C {
+		if b, err := mimic.FetchRealSSHBanner(addr); err == nil && b != "" {
+			m.v.Store(b)
+		}
 	}
 }
 
