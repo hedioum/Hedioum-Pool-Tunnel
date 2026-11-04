@@ -32,6 +32,14 @@ func promptIntDefault(msg string, def int) int {
 	return def
 }
 
+// promptPortDefault is promptIntDefault for a port: it re-asks until the value is
+// within 1..65535 (blank keeps the default).
+func promptPortDefault(msg string, def int) int {
+	s := strconv.Itoa(def)
+	survey.AskOne(&survey.Input{Message: msg, Default: s}, &s, survey.WithValidator(validatePortInput))
+	return clampPort(s, def)
+}
+
 func promptStrDefault(msg, def string) string {
 	v := def
 	survey.AskOne(&survey.Input{Message: msg, Default: def}, &v)
@@ -67,10 +75,10 @@ func editIranNode(cfg *config.AppConfig, node config.ForeignNode) {
 	types := promptMimicsWithDefault(splitCSV(nodeMimicTypesCSV(node)))
 	portMap := currentNodePorts(node)
 	for _, ty := range types {
-		portMap[ty] = promptIntDefault(fmt.Sprintf("  %s port:", ty), ports[ty])
+		portMap[ty] = promptPortDefault(fmt.Sprintf("  %s port:", ty), ports[ty])
 	}
 	sni := promptStrDefault("TLS SNI (foreign domain; blank = none):", firstEndpointSNI(node))
-	socks := promptIntDefault("Local SOCKS5 bind port:", node.LocalSocksPort)
+	socks := promptPortDefault("Local SOCKS5 bind port:", node.LocalSocksPort)
 	minC := promptIntDefault("Min warm-up connections:", node.MinConnections)
 	maxC := promptIntDefault("Max connections:", node.MaxConnections)
 	bw := promptIntDefault("Per-connection Mbps cap:", node.BandwidthLimitMbps)

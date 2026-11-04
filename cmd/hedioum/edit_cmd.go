@@ -394,6 +394,9 @@ func cmdEditNode(args []string) {
 			fail("--%s-port: %v", label, err)
 		}
 	}
+	if err := validPort(*socksPort); err != nil {
+		fail("--socks-port: %v", err)
+	}
 	newToken, tokenNote, err := resolveTokenEdit(node.AuthToken, *token, *rotateToken)
 	if err != nil {
 		fail("--token: %v", err)

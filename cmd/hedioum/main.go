@@ -22,7 +22,9 @@ import (
 //
 // v0.11.1 is a security patch: Go 1.26.10 (18 reachable stdlib vulns in
 // net/http, crypto/tls, crypto/x509 on the mimic/panel/ACME paths) plus
-// klauspost/compress, x/crypto, x/net, x/text bumps. No functional change.
+// klauspost/compress, x/crypto, x/net, x/text bumps. Also fixes the dashboard
+// "Add Node" hang (#37): the SOCKS port search no longer loops forever on an
+// out-of-range port, and SOCKS/mimic ports are range-checked on every input path.
 //
 // v0.11.0 adds transparent L3 Gateway mode (--gateway): a hub — especially a
 // single container on MikroTik/RouterOS or any Linux router — forwards transit
