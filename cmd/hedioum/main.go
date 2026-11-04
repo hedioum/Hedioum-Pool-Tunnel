@@ -20,6 +20,10 @@ import (
 // AppVersion defines the current build version for the self-updater.
 // CRITICAL: This must match the GitHub Release Tag exactly (e.g., v0.6.0)
 //
+// v0.11.1 is a security patch: Go 1.26.10 (18 reachable stdlib vulns in
+// net/http, crypto/tls, crypto/x509 on the mimic/panel/ACME paths) plus
+// klauspost/compress, x/crypto, x/net, x/text bumps. No functional change.
+//
 // v0.11.0 adds transparent L3 Gateway mode (--gateway): a hub — especially a
 // single container on MikroTik/RouterOS or any Linux router — forwards transit
 // traffic that arrives on its LAN-facing interface into the tunnel, so a whole LAN
@@ -28,7 +32,7 @@ import (
 // ip_forward), with a RouterOS-7.22 ip-rule-priority guard. Validated end-to-end on
 // a real RouterOS CHR and on a plain Linux router. Wire protocol UNCHANGED since
 // v0.8.0; gateway/TUN are hub-side only, so v0.11 hubs interoperate with v0.9 foreigns.
-const AppVersion = "v0.11.0"
+const AppVersion = "v0.11.1"
 
 func main() {
 	// Management subcommands (a non-flag first argument): install, setup-*, etc.
