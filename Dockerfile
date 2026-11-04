@@ -21,7 +21,7 @@
 #       setup-iran --alias FR --token <pairing-token> --socks-port 40001 --tun --dns
 
 # ---- build stage ----
-FROM --platform=$BUILDPLATFORM golang:1.26 AS build
+FROM --platform=$BUILDPLATFORM golang:1.26.10 AS build
 ARG TARGETOS
 ARG TARGETARCH
 ARG TARGETVARIANT
