@@ -216,12 +216,14 @@ func setupIranNode(cfg *config.AppConfig, isFirstTime bool) {
 			Validate: validateHost,
 		},
 		{
-			Name:   "targetport",
-			Prompt: &survey.Input{Message: "Foreign SSH mimic port (other mimics use standard ports):", Default: "22"},
+			Name:     "targetport",
+			Prompt:   &survey.Input{Message: "Foreign SSH mimic port (other mimics use standard ports):", Default: "22"},
+			Validate: validatePortInput,
 		},
 		{
-			Name:   "localsocksport",
-			Prompt: &survey.Input{Message: "Local SOCKS5 Bind Port (for X-UI Outbound mapping):", Default: suggestedSocksPort},
+			Name:     "localsocksport",
+			Prompt:   &survey.Input{Message: "Local SOCKS5 Bind Port (for X-UI Outbound mapping):", Default: suggestedSocksPort},
+			Validate: validatePortInput,
 		},
 		{
 			Name:   "minconnections",
@@ -292,8 +294,8 @@ func setupIranNode(cfg *config.AppConfig, isFirstTime bool) {
 	}
 
 	// Safely parse all integer inputs, falling back to defaults if empty or invalid (0)
-	node.TargetPort = safeAtoi(answers.TargetPort, 22)
-	node.LocalSocksPort = safeAtoi(answers.LocalSocksPort, safeAtoi(suggestedSocksPort, 40001))
+	node.TargetPort = clampPort(answers.TargetPort, 22)
+	node.LocalSocksPort = clampPort(answers.LocalSocksPort, clampPort(suggestedSocksPort, socksPortBase))
 	node.MinConnections = safeAtoi(answers.MinConnections, 10)
 	node.MaxConnections = safeAtoi(answers.MaxConnections, 20)
 	node.BandwidthLimitMbps = safeAtoi(answers.BandwidthLimit, 8)
@@ -393,26 +395,62 @@ func setupIranNode(cfg *config.AppConfig, isFirstTime bool) {
 
 // --- Helper Functions ---
 
-// getNextFreeSocksPort scans existing configurations for the highest used SOCKS5 port,
-// increments it, and dynamically tests the OS to ensure the port is actually free.
+// socksPortBase is where SOCKS5 port suggestions start.
+const socksPortBase = 40001
+
+// getNextFreeSocksPort suggests the next SOCKS5 port: one above the highest valid
+// port already in use, skipping ports that are taken in config or busy on the OS.
+// The search is bounded (it wraps to socksPortBase at 65535) so an out-of-range
+// port in an existing node can never make it spin forever (issue #37).
 func getNextFreeSocksPort(cfg *config.AppConfig) string {
-	startPort := 40001
+	used := map[int]bool{}
+	start := socksPortBase
 	for _, node := range cfg.ForeignNodes {
-		if node.LocalSocksPort >= startPort {
-			startPort = node.LocalSocksPort + 1
+		p := node.LocalSocksPort
+		if validPort(p) != nil {
+			continue // ignore a corrupt/out-of-range port instead of building on it
+		}
+		used[p] = true
+		if p >= start && p < 65535 {
+			start = p + 1
 		}
 	}
 
-	// Keep testing ports until we find one that is actively free on the OS
-	for {
-		ln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", startPort))
-		if err == nil {
-			ln.Close() // The port is free, close the test listener
-			break
+	free := func(p int) bool {
+		if used[p] {
+			return false
 		}
-		startPort++
+		ln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", p))
+		if err != nil {
+			return false
+		}
+		ln.Close()
+		return true
 	}
-	return strconv.Itoa(startPort)
+	for p := start; p <= 65535; p++ {
+		if free(p) {
+			return strconv.Itoa(p)
+		}
+	}
+	for p := socksPortBase; p < start; p++ {
+		if free(p) {
+			return strconv.Itoa(p)
+		}
+	}
+	return strconv.Itoa(socksPortBase) // nothing free in range; the operator can override
+}
+
+// validatePortInput is a survey validator for a port prompt (blank = use default).
+func validatePortInput(val interface{}) error {
+	s := strings.TrimSpace(fmt.Sprint(val))
+	if s == "" {
+		return nil
+	}
+	p, err := strconv.Atoi(s)
+	if err != nil {
+		return fmt.Errorf("%q is not a number", s)
+	}
+	return validPort(p)
 }
 
 // nextFreeTun assigns this hub's next unused TUN interface name and /24, so multiple
