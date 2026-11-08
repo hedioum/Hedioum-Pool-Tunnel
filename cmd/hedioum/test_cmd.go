@@ -78,7 +78,9 @@ func testNodeConnection(n config.ForeignNode) {
 		color.Red(" [x] No endpoint is reachable — the tunnel cannot come up. Check the foreign and firewall.")
 		return
 	}
-	color.HiBlack("   %d/%d endpoints reachable.", reachable, len(n.Endpoints))
+	if !n.Reverse {
+		color.HiBlack("   %d/%d endpoints reachable.", reachable, len(n.Endpoints))
+	}
 
 	// 2. SOCKS egress (always on). Reach the listener on loopback unless it is bound
 	// to a specific non-loopback address (e.g. a container veth IP), in which case
