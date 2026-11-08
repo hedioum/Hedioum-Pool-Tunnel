@@ -128,3 +128,46 @@ func TestAdoptUnknownNode(t *testing.T) {
 		t.Fatal("adopting into an unknown node must fail")
 	}
 }
+
+// TestMixedForwardAndReverseNodes: one hub can run normal (hub-dials) nodes next to a
+// reverse node. The forward node keeps dialing and serving; the reverse node stays
+// empty until its foreign dials in, and adopting its pipes never touches the other.
+func TestMixedForwardAndReverseNodes(t *testing.T) {
+	hm := NewHubManager()
+
+	fwd := reverseTestNode("fwd", 1, 3)
+	fwd.Reverse = false
+	hm.RegisterNode(fwd, fakeDialer)                     // normal node: the hub dials
+	hm.RegisterReverseNode(reverseTestNode("rev", 1, 3)) // reverse node: the foreign dials
+
+	// The forward node warms up on its own (TCP min 1 + UDP min 2).
+	deadline := time.Now().Add(10 * time.Second)
+	for hm.GetStats("fwd").ActiveConns < 1+udpMinConns {
+		if time.Now().After(deadline) {
+			t.Fatalf("forward node did not warm up next to a reverse node: %+v", hm.GetStats("fwd"))
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	// The reverse node dialed nothing.
+	if st := hm.GetStats("rev"); st.ActiveConns != 0 {
+		t.Fatalf("reverse node must stay empty until its foreign dials in: %+v", st)
+	}
+
+	// Adopt the reverse node's pipes: it serves, and the forward node is unaffected.
+	before := hm.GetStats("fwd").ActiveConns
+	for i := 0; i < udpMinConns+1; i++ {
+		if err := hm.AdoptSession("rev", reversePipe(t), "tls"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, alias := range []string{"fwd", "rev"} {
+		s, err := hm.GetStreamTCP(alias)
+		if err != nil {
+			t.Fatalf("node %q must serve streams: %v", alias, err)
+		}
+		s.Close()
+	}
+	if after := hm.GetStats("fwd").ActiveConns; after != before {
+		t.Fatalf("adopting reverse pipes changed the forward node: %d -> %d", before, after)
+	}
+}
