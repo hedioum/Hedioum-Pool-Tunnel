@@ -156,7 +156,9 @@ func nodeSourceIPs(cfg *config.AppConfig, node config.ForeignNode) []string {
 	var out []string
 	seen := map[string]bool{}
 	add := func(n config.ForeignNode) {
-		if ip := net.ParseIP(n.TargetIP); ip != nil && !seen[ip.String()] {
+		// The endpoints hold the address the node is really reached at; TargetIP is only a
+		// fallback, and may be empty or stale on a node that was edited later.
+		if ip := net.ParseIP(nodeTargetIP(n)); ip != nil && !seen[ip.String()] {
 			seen[ip.String()] = true
 			out = append(out, ip.String())
 		}
