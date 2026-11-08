@@ -40,6 +40,7 @@ func runInteractiveDashboard(cfg *config.AppConfig) {
 				"8. Test Connection (full egress: exit IP, sites, DNS, TUN)",
 				"9. Check This Server's IP Reputation",
 				"10. Restart the Service (reset all pools)",
+				"11. Reverse Tunnel: Switch a Node Normal <-> Reverse",
 			)
 		} else {
 			options = append(options,
@@ -47,6 +48,7 @@ func runInteractiveDashboard(cfg *config.AppConfig) {
 				"4. Rotate Authentication Token",
 				"5. Check Egress IP Reputation",
 				"6. Restart the Service",
+				"7. Reverse Mode: Dial the Hub (when the hub can't reach this server)",
 			)
 		}
 
@@ -78,6 +80,9 @@ func runInteractiveDashboard(cfg *config.AppConfig) {
 					color.HiCyan("\n=== [ Active Mesh Topologies & Live Stats ] ===")
 					for _, n := range cfg.ForeignNodes {
 						fmt.Printf("\n 🟢 Target Alias : %s\n", color.HiWhiteString(n.Alias))
+						if n.Reverse {
+							fmt.Printf(" ├─ Mode         : %s (the foreign dials this hub)\n", color.HiYellowString("REVERSE"))
+						}
 						fmt.Printf(" ├─ Local SOCKS5 : 127.0.0.1:%d\n", n.LocalSocksPort)
 						if n.TunEnabled || n.GatewayEnabled {
 							dnsNote := ""
@@ -121,6 +126,9 @@ func runInteractiveDashboard(cfg *config.AppConfig) {
 					personaLabel = "custom"
 				}
 				fmt.Printf(" ├─ Persona     : %s (%d mimics)\n", personaLabel, len(cfg.Mimics))
+				if len(cfg.ReverseTargets) > 0 {
+					fmt.Printf(" ├─ Mode        : %s (dials the hub, %d endpoint(s))\n", color.HiYellowString("REVERSE"), len(cfg.ReverseTargets))
+				}
 				fmt.Printf(" ├─ Listen Port : %d\n", cfg.ForeignListenPort)
 				fmt.Printf(" └─ Auth Token  : %s\n", color.HiYellowString(cfg.AuthToken))
 				color.HiBlack("    (Use this token when configuring your Iran Hub)")
@@ -173,6 +181,12 @@ func runInteractiveDashboard(cfg *config.AppConfig) {
 
 		case strings.Contains(action, "IP Reputation"):
 			cmdCheckIP(nil)
+
+		case strings.Contains(action, "Reverse Tunnel: Switch a Node"):
+			runReverseIranMenu(cfg)
+
+		case strings.Contains(action, "Reverse Mode: Dial the Hub"):
+			runReverseForeignMenu(cfg)
 
 		case strings.Contains(action, "Restart the Service"):
 			color.HiBlue("\n[*] Restarting hedioum.service (re-warms every pool)...")

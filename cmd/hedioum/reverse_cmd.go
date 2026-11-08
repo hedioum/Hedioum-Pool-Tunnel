@@ -84,12 +84,265 @@ func reverseFirewallPorts(cfg *config.AppConfig) []int {
 	return ports
 }
 
+// reversePortCandidates are tried, in order, when the port a reverse listener would
+// normally use is already taken on the hub (a panel, a web server, user configs...).
+var reversePortCandidates = []int{8443, 2053, 2096, 2083, 2087, 9443, 4443, 10443, 8888}
+
+// portInUse reports whether a TCP port cannot be bound on this host. A variable so
+// tests can fake it.
+var portInUse = func(p int) bool {
+	l, err := net.Listen("tcp", ":"+strconv.Itoa(p))
+	if err != nil {
+		return true
+	}
+	_ = l.Close()
+	return false
+}
+
+// reversePlan is what flipping a node to reverse mode will do.
+type reversePlan struct {
+	Listeners []config.MimicListener
+	Endpoints map[string]int // type -> port, as embedded in the pairing token
+	SNI       string
+	Moved     map[string]int // type -> port it would normally use but was taken (auto-moved)
+}
+
+func findNode(cfg *config.AppConfig, alias string) *config.ForeignNode {
+	for i := range cfg.ForeignNodes {
+		if cfg.ForeignNodes[i].Alias == alias {
+			return &cfg.ForeignNodes[i]
+		}
+	}
+	return nil
+}
+
+// planReverse works out the reverse listeners for a node: its own mimic set minus
+// SSH, each on the node's current port unless the operator overrode it. A port that
+// is taken on this host (or by another reverse node) is moved to a free candidate
+// automatically; an explicit override that is taken is an error.
+func planReverse(cfg *config.AppConfig, node *config.ForeignNode, overrides map[string]int) (reversePlan, error) {
+	var types []string
+	for _, e := range node.Endpoints {
+		types = append(types, e.Mimic)
+	}
+	types = reverseCapableTypes(types)
+	if len(types) == 0 {
+		resolved, err := persona.Resolve(persona.Auto(node.AuthToken), node.AuthToken)
+		if err != nil {
+			return reversePlan{}, fmt.Errorf("cannot derive a reverse mimic set: %v", err)
+		}
+		types = reverseCapableTypes(resolved)
+	}
+
+	ports := currentNodePorts(*node)
+	usedByOthers := map[int]string{}
+	for _, n := range cfg.ForeignNodes {
+		if n.Alias == node.Alias || !n.Reverse {
+			continue
+		}
+		for _, ml := range n.ReverseListeners {
+			usedByOthers[ml.Port] = n.Alias
+		}
+	}
+	// Ports this node's own (already running) reverse listeners hold are not "taken".
+	own := map[int]bool{}
+	if node.Reverse {
+		for _, ml := range node.ReverseListeners {
+			own[ml.Port] = true
+		}
+	}
+	taken := func(p int, inPlan map[int]string) bool {
+		if _, ok := usedByOthers[p]; ok {
+			return true
+		}
+		if _, ok := inPlan[p]; ok {
+			return true
+		}
+		return !own[p] && portInUse(p)
+	}
+
+	plan := reversePlan{Endpoints: map[string]int{}, Moved: map[string]int{}, SNI: firstEndpointSNI(*node)}
+	inPlan := map[int]string{}
+	chosen := map[string]int{}
+
+	// Pass 1: explicit overrides and every type whose usual port is free keep it, so a
+	// type that has to move can never grab a port another type is about to keep.
+	var needMove []string
+	for _, ty := range types {
+		if p, explicit := overrides[ty]; explicit {
+			if err := validPort(p); err != nil {
+				return reversePlan{}, fmt.Errorf("--ports %s: %v", ty, err)
+			}
+			if other, ok := inPlan[p]; ok {
+				return reversePlan{}, fmt.Errorf("port %d is used by both %s and %s; pass --ports to separate them", p, other, ty)
+			}
+			if other, ok := usedByOthers[p]; ok {
+				return reversePlan{}, fmt.Errorf("port %d is already used by reverse node %q; pass --ports to pick another", p, other)
+			}
+			if !own[p] && portInUse(p) {
+				return reversePlan{}, fmt.Errorf("port %d (%s) is already in use on this host; pick another", p, ty)
+			}
+			inPlan[p], chosen[ty] = ty, p
+			continue
+		}
+		if p := ports[ty]; p > 0 && !taken(p, inPlan) {
+			inPlan[p], chosen[ty] = ty, p
+			continue
+		}
+		needMove = append(needMove, ty)
+	}
+	// Pass 2: move the rest to the first free candidate.
+	for _, ty := range needMove {
+		p := 0
+		for _, c := range reversePortCandidates {
+			if !taken(c, inPlan) {
+				p = c
+				break
+			}
+		}
+		if p == 0 {
+			return reversePlan{}, fmt.Errorf("no free port found for %s; pass --ports", ty)
+		}
+		if old := ports[ty]; old > 0 {
+			plan.Moved[ty] = old
+		}
+		inPlan[p], chosen[ty] = ty, p
+	}
+	for _, ty := range types {
+		p := chosen[ty]
+		plan.Listeners = append(plan.Listeners, config.MimicListener{Type: ty, Port: p, ServerName: plan.SNI})
+		plan.Endpoints[ty] = p
+	}
+	return plan, nil
+}
+
+// resolveHubIP returns the hub's public IP: the given one, or auto-detected.
+func resolveHubIP(given string) (string, error) {
+	ip := given
+	if ip == "" {
+		if detected, err := sysutil.GetPublicIPv4(); err == nil {
+			ip = detected
+		}
+	}
+	if ip == "" {
+		return "", fmt.Errorf("could not detect this hub's public IP; pass --public-ip")
+	}
+	if err := validIP(ip); err != nil {
+		return "", fmt.Errorf("--public-ip: %v", err)
+	}
+	return ip, nil
+}
+
+// applyReverseIran flips the node to reverse mode in cfg (the caller saves it) and
+// returns the plan plus the reverse pairing token for the foreign.
+func applyReverseIran(cfg *config.AppConfig, alias string, overrides map[string]int, publicIP string) (reversePlan, string, error) {
+	node := findNode(cfg, alias)
+	if node == nil {
+		return reversePlan{}, "", fmt.Errorf("no node with alias %q", alias)
+	}
+	plan, err := planReverse(cfg, node, overrides)
+	if err != nil {
+		return reversePlan{}, "", err
+	}
+	ip, err := resolveHubIP(publicIP)
+	if err != nil {
+		return reversePlan{}, "", err
+	}
+	node.Reverse = true
+	node.ReverseListeners = plan.Listeners
+	tok := pairing.Encode(pairing.Token{ExitIP: ip, AuthKey: node.AuthToken, SNI: plan.SNI, Endpoints: plan.Endpoints, Reverse: true})
+	return plan, tok, nil
+}
+
+// applyForwardIran flips a reverse node back to the normal mode in cfg.
+func applyForwardIran(cfg *config.AppConfig, alias string) error {
+	node := findNode(cfg, alias)
+	if node == nil {
+		return fmt.Errorf("no node with alias %q", alias)
+	}
+	if !node.Reverse {
+		return fmt.Errorf("node %q is already in the normal (hub-dials-foreign) mode", alias)
+	}
+	if len(node.Endpoints) == 0 {
+		return fmt.Errorf("node %q has no endpoints to dial; re-add it with add-node", alias)
+	}
+	node.Reverse = false
+	node.ReverseListeners = nil
+	return nil
+}
+
+// applyReverseForeign switches a foreign config to dial the hub from a reverse
+// pairing token. It returns the number of endpoints and whether the auth key changed.
+func applyReverseForeign(cfg *config.AppConfig, token string, conns int, keep bool) (int, bool, error) {
+	pt, isV2, err := pairing.Decode(token)
+	if err != nil || !isV2 {
+		return 0, false, fmt.Errorf("the token must be a reverse pairing token from `reverse-iran` (%v)", err)
+	}
+	if !pt.Reverse {
+		return 0, false, fmt.Errorf("this is a normal pairing token; get a reverse one by running `reverse-iran` on the hub")
+	}
+	if conns < 0 {
+		return 0, false, fmt.Errorf("--conns must be positive")
+	}
+	var targets []config.Endpoint
+	for _, ty := range mimicTypesAll {
+		port, ok := pt.Endpoints[ty]
+		if !ok || ty == "ssh" {
+			continue
+		}
+		targets = append(targets, config.Endpoint{
+			Target:     net.JoinHostPort(pt.ExitIP, strconv.Itoa(port)),
+			Mimic:      ty,
+			ServerName: pt.SNI,
+		})
+	}
+	if len(targets) == 0 {
+		return 0, false, fmt.Errorf("the token has no usable reverse endpoints")
+	}
+	keyChanged := pt.AuthKey != cfg.AuthToken
+	if keyChanged {
+		cfg.AuthToken = pt.AuthKey
+	}
+	cfg.ReverseTargets = targets
+	cfg.ReverseConns = conns // 0 = default (applied on load)
+	cfg.ReverseOnly = !keep
+	return len(targets), keyChanged, nil
+}
+
+// applyForwardForeign restores the normal mode on a foreign config.
+func applyForwardForeign(cfg *config.AppConfig) error {
+	if len(cfg.ReverseTargets) == 0 && !cfg.ReverseOnly {
+		return fmt.Errorf("this foreign is already in the normal (hub-dials-foreign) mode")
+	}
+	cfg.ReverseTargets = nil
+	cfg.ReverseConns = 0
+	cfg.ReverseOnly = false
+	return nil
+}
+
+// printReversePlan prints the listeners (and any auto-moved ports) of a plan.
+func printReversePlan(alias string, plan reversePlan) {
+	names := make([]string, len(plan.Listeners))
+	for i, l := range plan.Listeners {
+		names[i] = fmt.Sprintf("%s:%d", l.Type, l.Port)
+	}
+	color.Green("[✓] Node %q is now in REVERSE mode (the foreign dials this hub).", alias)
+	color.Green("    Listening on: %s", strings.Join(names, ", "))
+	for _, l := range plan.Listeners {
+		if old, moved := plan.Moved[l.Type]; moved {
+			color.Yellow("    %s: port %d is taken on this host, using %d instead.", l.Type, old, l.Port)
+		}
+	}
+	color.Yellow("    These ports must be reachable from the foreign server (open them in any")
+	color.Yellow("    provider/network firewall; the host firewall is handled on start).")
+}
+
 // cmdReverseIran flips an existing hub node to reverse mode (or back with --forward)
 // and prints the reverse pairing token the foreign needs.
 func cmdReverseIran(args []string) {
 	fs := flag.NewFlagSet("reverse-iran", flag.ExitOnError)
 	alias := fs.String("alias", "", "node alias to flip (required)")
-	portsSpec := fs.String("ports", "", "listener ports as TYPE=PORT,... (default: the node's current endpoint ports)")
+	portsSpec := fs.String("ports", "", "listener ports as TYPE=PORT,... (default: the node's endpoint ports; a port taken on this host is replaced by a free one)")
 	publicIP := fs.String("public-ip", "", "this hub's public IP to embed in the token (auto-detected if empty)")
 	forward := fs.Bool("forward", false, "flip the node back to the normal mode (the hub dials the foreign)")
 	_ = fs.Parse(args)
@@ -101,26 +354,11 @@ func cmdReverseIran(args []string) {
 	if err != nil || cfg.Role != "iran" {
 		fail("no Iran hub config (run this on the hub)")
 	}
-	var node *config.ForeignNode
-	for i := range cfg.ForeignNodes {
-		if cfg.ForeignNodes[i].Alias == *alias {
-			node = &cfg.ForeignNodes[i]
-			break
-		}
-	}
-	if node == nil {
-		fail("no node with alias %q", *alias)
-	}
 
 	if *forward {
-		if !node.Reverse {
-			fail("node %q is already in the normal (hub-dials-foreign) mode", *alias)
+		if err := applyForwardIran(cfg, *alias); err != nil {
+			fail("%v", err)
 		}
-		if len(node.Endpoints) == 0 {
-			fail("node %q has no endpoints to dial; re-add it with add-node", *alias)
-		}
-		node.Reverse = false
-		node.ReverseListeners = nil
 		if err := config.SaveConfig(cfg); err != nil {
 			fail("failed to save config: %v", err)
 		}
@@ -131,88 +369,18 @@ func cmdReverseIran(args []string) {
 		return
 	}
 
-	// Mimic set: the node's own (so both ends keep the same camouflage), minus SSH. A
-	// legacy SSH-only node falls back to the token's persona.
-	var types []string
-	for _, e := range node.Endpoints {
-		types = append(types, e.Mimic)
-	}
-	types = reverseCapableTypes(types)
-	if len(types) == 0 {
-		resolved, rerr := persona.Resolve(persona.Auto(node.AuthToken), node.AuthToken)
-		if rerr != nil {
-			fail("cannot derive a reverse mimic set: %v", rerr)
-		}
-		types = reverseCapableTypes(resolved)
-	}
-
 	overrides, err := parsePortOverrides(*portsSpec)
 	if err != nil {
 		fail("--ports: %v", err)
 	}
-	ports := currentNodePorts(*node)
-	for ty, p := range overrides {
-		ports[ty] = p
+	plan, tok, err := applyReverseIran(cfg, *alias, overrides, *publicIP)
+	if err != nil {
+		fail("%v", err)
 	}
-	sni := firstEndpointSNI(*node)
-
-	usedByOthers := map[int]string{}
-	for _, n := range cfg.ForeignNodes {
-		if n.Alias == node.Alias || !n.Reverse {
-			continue
-		}
-		for _, ml := range n.ReverseListeners {
-			usedByOthers[ml.Port] = n.Alias
-		}
-	}
-	seen := map[int]string{}
-	var listeners []config.MimicListener
-	eps := map[string]int{}
-	for _, ty := range types {
-		p := ports[ty]
-		if err := validPort(p); err != nil {
-			fail("--ports %s: %v", ty, err)
-		}
-		if other, ok := seen[p]; ok {
-			fail("port %d is used by both %s and %s; pass --ports to separate them", p, other, ty)
-		}
-		if other, ok := usedByOthers[p]; ok {
-			fail("port %d is already used by reverse node %q; pass --ports to pick another", p, other)
-		}
-		seen[p] = ty
-		listeners = append(listeners, config.MimicListener{Type: ty, Port: p, ServerName: sni})
-		eps[ty] = p
-	}
-
-	ip := *publicIP
-	if ip == "" {
-		if detected, derr := sysutil.GetPublicIPv4(); derr == nil {
-			ip = detected
-		}
-	}
-	if ip == "" {
-		fail("could not detect this hub's public IP; pass --public-ip")
-	}
-	if err := validIP(ip); err != nil {
-		fail("--public-ip: %v", err)
-	}
-
-	node.Reverse = true
-	node.ReverseListeners = listeners
 	if err := config.SaveConfig(cfg); err != nil {
 		fail("failed to save config: %v", err)
 	}
-
-	typeNames := make([]string, len(listeners))
-	for i, l := range listeners {
-		typeNames[i] = fmt.Sprintf("%s:%d", l.Type, l.Port)
-	}
-	color.Green("[✓] Node %q is now in REVERSE mode (the foreign dials this hub).", *alias)
-	color.Green("    Listening on: %s", strings.Join(typeNames, ", "))
-	color.Yellow("    These ports must be reachable from the foreign server (open them in any")
-	color.Yellow("    provider/network firewall; the host firewall is handled on start).")
-
-	tok := pairing.Encode(pairing.Token{ExitIP: ip, AuthKey: node.AuthToken, SNI: sni, Endpoints: eps, Reverse: true})
+	printReversePlan(*alias, plan)
 	color.HiGreen("\n━━━ Foreign onboarding ━━━")
 	color.HiGreen("Run this on the foreign server (same token/auth as before; only the direction flips):")
 	fmt.Printf("hedioum-tunnel reverse-foreign --token %s\n", tok)
@@ -237,12 +405,9 @@ func cmdReverseForeign(args []string) {
 	}
 
 	if *forward {
-		if len(cfg.ReverseTargets) == 0 && !cfg.ReverseOnly {
-			fail("this foreign is already in the normal (hub-dials-foreign) mode")
+		if err := applyForwardForeign(cfg); err != nil {
+			fail("%v", err)
 		}
-		cfg.ReverseTargets = nil
-		cfg.ReverseConns = 0
-		cfg.ReverseOnly = false
 		if err := config.SaveConfig(cfg); err != nil {
 			fail("failed to save config: %v", err)
 		}
@@ -256,49 +421,21 @@ func cmdReverseForeign(args []string) {
 	if *token == "" {
 		fail("--token is required (the reverse pairing token printed by `reverse-iran`)")
 	}
-	pt, isV2, perr := pairing.Decode(*token)
-	if perr != nil || !isV2 {
-		fail("--token must be a reverse pairing token from `reverse-iran` (%v)", perr)
+	n, keyChanged, err := applyReverseForeign(cfg, *token, *conns, *keep)
+	if err != nil {
+		fail("%v", err)
 	}
-	if !pt.Reverse {
-		fail("this is a normal pairing token; get a reverse one by running `reverse-iran` on the hub")
+	if keyChanged {
+		color.Yellow("[!] The token's auth key differs from this foreign's: switched to the hub's key.")
 	}
-	if *conns < 0 {
-		fail("--conns must be positive")
-	}
-
-	var targets []config.Endpoint
-	for _, ty := range mimicTypesAll {
-		port, ok := pt.Endpoints[ty]
-		if !ok || ty == "ssh" {
-			continue
-		}
-		targets = append(targets, config.Endpoint{
-			Target:     net.JoinHostPort(pt.ExitIP, strconv.Itoa(port)),
-			Mimic:      ty,
-			ServerName: pt.SNI,
-		})
-	}
-	if len(targets) == 0 {
-		fail("the token has no usable reverse endpoints")
-	}
-
-	if pt.AuthKey != cfg.AuthToken {
-		color.Yellow("[!] The token's auth key differs from this foreign's: switching to the hub's key.")
-		cfg.AuthToken = pt.AuthKey
-	}
-	cfg.ReverseTargets = targets
-	cfg.ReverseConns = *conns // 0 = default (applied on load)
-	cfg.ReverseOnly = !*keep
 	if err := config.SaveConfig(cfg); err != nil {
 		fail("failed to save config: %v", err)
 	}
-
 	mode := "dial-out only (no inbound ports)"
 	if *keep {
 		mode = "dial-out plus the normal inbound listeners"
 	}
-	color.Green("[✓] Reverse mode on: dialing the hub across %d endpoint(s), %s.", len(targets), mode)
+	color.Green("[✓] Reverse mode on: dialing the hub across %d endpoint(s), %s.", n, mode)
 	reconcileUnit("foreign")
 	restartDaemon()
 }
