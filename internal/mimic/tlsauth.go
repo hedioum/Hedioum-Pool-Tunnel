@@ -66,26 +66,45 @@ func clientProveTLS(inner net.Conn, token string, certFP [32]byte) error {
 // web decoy), then write the ack to w. Returns securestream.ErrAuth on any
 // failure. filter rejects replayed nonces (may be nil).
 func serverVerifyTLS(w io.Writer, r io.Reader, token string, certFP [32]byte, filter *securestream.ReplayFilter) error {
+	_, err := serverVerifyTLSAny(w, r, []string{token}, certFP, filter)
+	return err
+}
+
+// serverVerifyTLSAny is serverVerifyTLS for a listener that serves several tokens
+// (the hub's shared reverse listener: one SNI, several foreign nodes). The client's
+// message is read once and checked against every token; the ack is written with the
+// one that matched, whose index is returned. Every token is always checked, so the
+// time taken does not reveal which one matched.
+func serverVerifyTLSAny(w io.Writer, r io.Reader, tokens []string, certFP [32]byte, filter *securestream.ReplayFilter) (int, error) {
 	magic := make([]byte, len(tlsAuthMagic))
 	if _, err := io.ReadFull(r, magic); err != nil {
-		return securestream.ErrAuth
+		return -1, securestream.ErrAuth
 	}
 	if !bytes.Equal(magic, []byte(tlsAuthMagic)) {
-		return securestream.ErrAuth // not our client (e.g. a browser sending HTTP) -> decoy
+		return -1, securestream.ErrAuth // not our client (e.g. a browser sending HTTP) -> decoy
 	}
 	body := make([]byte, tlsNonceLen+tlsMACLen)
 	if _, err := io.ReadFull(r, body); err != nil {
-		return securestream.ErrAuth
+		return -1, securestream.ErrAuth
 	}
 	nonce, mac := body[:tlsNonceLen], body[tlsNonceLen:]
-	if !hmac.Equal(mac, tlsAuthMAC(token, certFP, nonce, 'C')) {
-		return securestream.ErrAuth // wrong token or MITM (cert fingerprint differs)
+	matched := -1
+	for i, token := range tokens {
+		if token == "" {
+			continue
+		}
+		if hmac.Equal(mac, tlsAuthMAC(token, certFP, nonce, 'C')) && matched < 0 {
+			matched = i
+		}
+	}
+	if matched < 0 {
+		return -1, securestream.ErrAuth // wrong token or MITM (cert fingerprint differs)
 	}
 	if filter != nil && !filter.Accept(nonce) {
-		return securestream.ErrAuth // replayed handshake
+		return -1, securestream.ErrAuth // replayed handshake
 	}
-	if _, err := w.Write(tlsAuthMAC(token, certFP, nonce, 'S')); err != nil {
-		return err
+	if _, err := w.Write(tlsAuthMAC(tokens[matched], certFP, nonce, 'S')); err != nil {
+		return -1, err
 	}
-	return nil
+	return matched, nil
 }

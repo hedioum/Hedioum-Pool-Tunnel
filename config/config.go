@@ -78,6 +78,14 @@ type AppConfig struct {
 
 	// Iran Node specific properties
 	ForeignNodes []ForeignNode `json:"foreign_nodes,omitempty"`
+
+	// SharedReverseAuth (advanced, hub, default off) lets several reverse nodes share
+	// one listener: nodes whose reverse listener has the same bind address, port, type
+	// and SNI are served by a single socket, and the hub tells them apart by which
+	// node token authenticates the handshake. Needed when one SNI (for example behind
+	// a front proxy that routes by SNI) has to carry several foreign servers. With it
+	// off every reverse node needs its own port, exactly as before.
+	SharedReverseAuth bool `json:"shared_reverse_auth,omitempty"`
 }
 
 // MimicListener is one camouflage listener on the foreign node.

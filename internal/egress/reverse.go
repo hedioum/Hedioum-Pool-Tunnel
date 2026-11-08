@@ -224,3 +224,20 @@ func foreignYamuxConfig() *yamux.Config {
 func BuildServerMimic(token, decoyStyle string, ml config.MimicListener, filter *securestream.ReplayFilter, certMgr *tlscert.CertManager) (mimic.ServerMimic, error) {
 	return buildServerMimic(&config.AppConfig{AuthToken: token, DecoyStyle: decoyStyle}, ml, filter, certMgr)
 }
+
+// BuildSharedServerMimic is BuildServerMimic for a listener shared by several reverse
+// nodes: it accepts any of tokens (the first one also seeds the decoy identity) and
+// the matching index is read back with mimic.MatchedToken. SSH cannot be shared.
+func BuildSharedServerMimic(tokens []string, decoyStyle string, ml config.MimicListener, filter *securestream.ReplayFilter, certMgr *tlscert.CertManager) (mimic.ServerMimic, error) {
+	if len(tokens) == 0 {
+		return nil, fmt.Errorf("no tokens for the shared listener")
+	}
+	m, err := BuildServerMimic(tokens[0], decoyStyle, ml, filter, certMgr)
+	if err != nil {
+		return nil, err
+	}
+	if len(tokens) > 1 && !mimic.SetExtraTokens(m, tokens[1:]) {
+		return nil, fmt.Errorf("the %s mimic cannot share a listener between nodes", ml.Type)
+	}
+	return m, nil
+}

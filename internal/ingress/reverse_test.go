@@ -275,3 +275,110 @@ func TestReverseBehindPlainTCPProxy(t *testing.T) {
 	startReverseForeign(proxyRelay(t, hubPort, false), reverseTestToken, 3)
 	waitActive(t, hm, "plain", 3)
 }
+
+const reverseTestToken2 = "fedcba9876543210fedcba9876543210"
+
+// startSharedHub brings up a hub with two reverse nodes on ONE listener (same port,
+// type and SNI) with shared_reverse_auth on (or off, to prove the default is strict).
+func startSharedHub(t *testing.T, shared bool) (*pool.HubManager, int) {
+	t.Helper()
+	old := reverseCertDir
+	reverseCertDir = t.TempDir()
+	t.Cleanup(func() { reverseCertDir = old })
+
+	port := freePort(t)
+	mk := func(alias, token string) config.ForeignNode {
+		return config.ForeignNode{
+			Alias: alias, AuthToken: token, Reverse: true,
+			ReverseListeners: []config.MimicListener{{Type: "tls", Port: port, ServerName: "shared.example.com"}},
+			MinConnections:   1, MaxConnections: 4,
+			BandwidthLimitMbps: 100,
+		}
+	}
+	a, b := mk("sa", reverseTestToken), mk("sb", reverseTestToken2)
+	cfg := &config.AppConfig{Role: "iran", SharedReverseAuth: shared, ForeignNodes: []config.ForeignNode{a, b}}
+	hm := pool.NewHubManager()
+	hm.RegisterReverseNode(a)
+	hm.RegisterReverseNode(b)
+	startReverseListeners(cfg, hm)
+
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		c, err := net.DialTimeout("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)), 200*time.Millisecond)
+		if err == nil {
+			c.Close()
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("shared reverse listener did not come up: %v", err)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	return hm, port
+}
+
+// TestSharedReverseListenerRoutesByToken: two foreigns dial the same port; each one's
+// pipes land in the pool of the node whose token it presented.
+func TestSharedReverseListenerRoutesByToken(t *testing.T) {
+	hm, port := startSharedHub(t, true)
+	// The first two pipes of a node feed its UDP sub-pool, so 3 and 4 leave a TCP pipe.
+	startReverseForeign(port, reverseTestToken, 3)
+	startReverseForeign(port, reverseTestToken2, 4)
+
+	waitActive(t, hm, "sa", 3)
+	waitActive(t, hm, "sb", 4)
+	time.Sleep(time.Second)
+	if a, b := hm.GetStats("sa").ActiveConns, hm.GetStats("sb").ActiveConns; a != 3 || b != 4 {
+		t.Fatalf("pipes went to the wrong node: sa=%d (want 3) sb=%d (want 4)", a, b)
+	}
+
+	// Each node serves its own foreign.
+	for _, alias := range []string{"sa", "sb"} {
+		st, err := hm.GetStreamTCP(alias)
+		if err != nil {
+			t.Fatalf("%s: no stream: %v", alias, err)
+		}
+		if err := tunproto.WriteSpeedtestHeader(st, tunproto.SpeedDown, 1); err != nil {
+			t.Fatal(err)
+		}
+		_ = st.SetReadDeadline(time.Now().Add(10 * time.Second))
+		if _, err := io.ReadFull(st, make([]byte, 32*1024)); err != nil {
+			t.Fatalf("%s: foreign did not serve the stream: %v", alias, err)
+		}
+		st.Close()
+	}
+}
+
+// TestSharedReverseListenerStillRejectsStrangers: an unknown token is not adopted by
+// any node of the shared listener.
+func TestSharedReverseListenerStillRejectsStrangers(t *testing.T) {
+	hm, port := startSharedHub(t, true)
+	startReverseForeign(port, "00000000000000000000000000000000", 2)
+	time.Sleep(4 * time.Second)
+	if a, b := hm.GetStats("sa").ActiveConns, hm.GetStats("sb").ActiveConns; a != 0 || b != 0 {
+		t.Fatalf("stranger adopted: sa=%d sb=%d", a, b)
+	}
+}
+
+// TestSharedReverseOffKeepsPortsExclusive: with the option off, two nodes on one port
+// are a configuration error, and the first node keeps the port.
+func TestSharedReverseOffKeepsPortsExclusive(t *testing.T) {
+	cfg := &config.AppConfig{ForeignNodes: []config.ForeignNode{
+		{Alias: "x", AuthToken: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", Reverse: true, ReverseListeners: []config.MimicListener{{Type: "tls", Port: 8443}}},
+		{Alias: "y", AuthToken: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", Reverse: true, ReverseListeners: []config.MimicListener{{Type: "tls", Port: 8443}}},
+	}}
+	groups, problems := reverseGroups(cfg)
+	if len(groups) != 1 || len(groups[0].Nodes) != 1 || groups[0].Nodes[0].Alias != "x" || len(problems) != 1 {
+		t.Fatalf("groups=%+v problems=%v", groups, problems)
+	}
+	cfg.SharedReverseAuth = true
+	groups, problems = reverseGroups(cfg)
+	if len(groups) != 1 || len(groups[0].Nodes) != 2 || len(problems) != 0 {
+		t.Fatalf("shared: groups=%+v problems=%v", groups, problems)
+	}
+	// A different SNI on the same port is not shareable.
+	cfg.ForeignNodes[1].ReverseListeners[0].ServerName = "other.example.com"
+	if _, problems = reverseGroups(cfg); len(problems) != 1 {
+		t.Fatalf("different SNI must not share: %v", problems)
+	}
+}
