@@ -241,6 +241,10 @@ func resolveHubIP(given string) (string, error) {
 type reverseOpts struct {
 	SNI   string // TLS SNI the foreign sends and the hub's certificate is issued for
 	Decoy string // decoy persona for unauthorized probes: apache | directadmin
+	// Advertise overrides the port the foreign is told to dial for a mimic type, when it
+	// differs from the port the hub listens on (e.g. a front proxy owns :443 and forwards
+	// by SNI to the listener). Only the token changes; the listeners stay as planned.
+	Advertise map[string]int
 }
 
 func validDecoyStyle(s string) error {
@@ -268,12 +272,25 @@ func applyReverseIran(cfg *config.AppConfig, alias string, overrides map[string]
 	if err != nil {
 		return reversePlan{}, "", err
 	}
+	advertised := map[string]int{}
+	for ty, p := range plan.Endpoints {
+		advertised[ty] = p
+	}
+	for ty, p := range opts.Advertise {
+		if _, ok := plan.Endpoints[ty]; !ok {
+			return reversePlan{}, "", fmt.Errorf("--advertise-ports %s: the node has no reverse listener of that type", ty)
+		}
+		if err := validPort(p); err != nil {
+			return reversePlan{}, "", fmt.Errorf("--advertise-ports %s: %v", ty, err)
+		}
+		advertised[ty] = p
+	}
 	node.Reverse = true
 	node.ReverseListeners = plan.Listeners
 	if opts.Decoy != "" {
 		node.ReverseDecoyStyle = opts.Decoy
 	}
-	tok := pairing.Encode(pairing.Token{ExitIP: ip, AuthKey: node.AuthToken, SNI: plan.SNI, Endpoints: plan.Endpoints, Reverse: true})
+	tok := pairing.Encode(pairing.Token{ExitIP: ip, AuthKey: node.AuthToken, SNI: plan.SNI, Endpoints: advertised, Reverse: true})
 	return plan, tok, nil
 }
 
@@ -372,6 +389,7 @@ func cmdReverseIran(args []string) {
 	portsSpec := fs.String("ports", "", "listener ports as TYPE=PORT,... (default: the node's endpoint ports; a port taken on this host is replaced by a free one)")
 	publicIP := fs.String("public-ip", "", "this hub's public IP to embed in the token (auto-detected if empty)")
 	sni := fs.String("sni", "", "TLS SNI the foreign sends and the hub's certificate is issued for (default: the node's current SNI)")
+	advertise := fs.String("advertise-ports", "", "ports the foreign dials, as TYPE=PORT,... when a front proxy (nginx stream) forwards them to the listener ports")
 	decoy := fs.String("decoy-style", "", "decoy shown to unauthorized probes: apache|directadmin (default: the node's, else the hub's)")
 	forward := fs.Bool("forward", false, "flip the node back to the normal mode (the hub dials the foreign)")
 	_ = fs.Parse(args)
@@ -402,7 +420,11 @@ func cmdReverseIran(args []string) {
 	if err != nil {
 		fail("--ports: %v", err)
 	}
-	plan, tok, err := applyReverseIran(cfg, *alias, overrides, *publicIP, reverseOpts{SNI: *sni, Decoy: *decoy})
+	adv, err := parsePortOverrides(*advertise)
+	if err != nil {
+		fail("--advertise-ports: %v", err)
+	}
+	plan, tok, err := applyReverseIran(cfg, *alias, overrides, *publicIP, reverseOpts{SNI: *sni, Decoy: *decoy, Advertise: adv})
 	if err != nil {
 		fail("%v", err)
 	}

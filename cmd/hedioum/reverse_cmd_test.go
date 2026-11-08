@@ -211,3 +211,27 @@ func TestApplyReverseCarriesSNIAndDecoy(t *testing.T) {
 		t.Fatalf("forward must clear the decoy: %v %q", err, cfg.ForeignNodes[0].ReverseDecoyStyle)
 	}
 }
+
+// With a front proxy the foreign is told a different port than the hub listens on.
+func TestApplyReverseAdvertisePorts(t *testing.T) {
+	fakePortsInUse(t)
+	n := planTestNode("a", config.Endpoint{Target: "1.2.3.4:8443", Mimic: "https-alt"})
+	cfg := &config.AppConfig{Role: "iran", ForeignNodes: []config.ForeignNode{n}}
+	plan, tok, err := applyReverseIran(cfg, "a", nil, "198.51.100.7", reverseOpts{Advertise: map[string]int{"https-alt": 443}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.Listeners[0].Port != 8443 || cfg.ForeignNodes[0].ReverseListeners[0].Port != 8443 {
+		t.Fatalf("the hub must still listen on 8443: %+v", plan.Listeners)
+	}
+	fcfg := &config.AppConfig{Role: "foreign"}
+	if _, _, err := applyReverseForeign(fcfg, tok, 0, false); err != nil {
+		t.Fatal(err)
+	}
+	if got := fcfg.ReverseTargets[0].Target; got != "198.51.100.7:443" {
+		t.Fatalf("the foreign must dial the advertised port, got %s", got)
+	}
+	if _, _, err := applyReverseIran(cfg, "a", nil, "198.51.100.7", reverseOpts{Advertise: map[string]int{"tls": 443}}); err == nil {
+		t.Fatal("advertising a type the node has no listener for must fail")
+	}
+}

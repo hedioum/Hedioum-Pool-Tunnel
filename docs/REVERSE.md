@@ -66,6 +66,13 @@ hedioum-tunnel reverse-foreign --forward                # on the foreign
   default: the hub's own). Both are also asked in the interactive menu. Run
   `reverse-iran --alias NAME --sni <the foreign's SNI> --decoy-style <the foreign's style>`
   to make the hub look like the foreign it stands in for.
+- **Behind a front proxy.** If nginx (or similar) owns the public port, forward the tunnel's
+  SNI to the listener with a stream `map` on `$ssl_preread_server_name` (pass the TCP through,
+  do not terminate TLS; use a tunnel SNI that is not one of your sites) and run
+  `reverse-iran --alias NAME --ports https-alt=8443 --advertise-ports https-alt=443 --sni <that SNI>`:
+  the hub listens on 8443 while the token tells the foreign to dial 443. If the proxy sends
+  the PROXY protocol, strip it on a local `listen 127.0.0.1:PORT proxy_protocol;` stream
+  server that forwards to the listener.
 - **Certificate.** Self-signed by default. Set `domain` (and optionally `acme_email`) in
   the hub config to serve a real Let's Encrypt certificate, as the foreign does.
 - **Authentication.** Unchanged and mutual: the foreign proves the token to the hub and the
