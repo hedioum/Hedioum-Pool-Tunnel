@@ -99,6 +99,7 @@ func editIranNode(cfg *config.AppConfig, node config.ForeignNode) {
 		BandwidthJitterMbps: jit,
 		Reverse:             node.Reverse,
 		ReverseListeners:    node.ReverseListeners,
+		ReverseDecoyStyle:   node.ReverseDecoyStyle,
 	})
 	color.Green("[✓] Node %q updated (target %s, mimics: %s).", node.Alias, ip, strings.Join(types, ","))
 }

@@ -76,7 +76,7 @@ func TestPlanReverseMovesTakenPorts(t *testing.T) {
 		config.Endpoint{Target: "1.2.3.4:8443", Mimic: "https-alt"},
 	)
 	cfg := &config.AppConfig{Role: "iran", ForeignNodes: []config.ForeignNode{n}}
-	plan, err := planReverse(cfg, &cfg.ForeignNodes[0], nil)
+	plan, err := planReverse(cfg, &cfg.ForeignNodes[0], nil, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -96,7 +96,7 @@ func TestPlanReverseExplicitPortInUseIsAnError(t *testing.T) {
 	fakePortsInUse(t, 443)
 	n := planTestNode("a", config.Endpoint{Target: "1.2.3.4:443", Mimic: "tls"})
 	cfg := &config.AppConfig{Role: "iran", ForeignNodes: []config.ForeignNode{n}}
-	if _, err := planReverse(cfg, &cfg.ForeignNodes[0], map[string]int{"tls": 443}); err == nil {
+	if _, err := planReverse(cfg, &cfg.ForeignNodes[0], map[string]int{"tls": 443}, ""); err == nil {
 		t.Fatal("an explicitly requested port that is taken must fail")
 	}
 }
@@ -111,14 +111,14 @@ func TestPlanReverseAvoidsOtherNodesAndOwnListeners(t *testing.T) {
 	b := planTestNode("b", config.Endpoint{Target: "5.6.7.8:8443", Mimic: "https-alt"})
 	cfg := &config.AppConfig{Role: "iran", ForeignNodes: []config.ForeignNode{a, b}}
 
-	planB, err := planReverse(cfg, &cfg.ForeignNodes[1], nil)
+	planB, err := planReverse(cfg, &cfg.ForeignNodes[1], nil, "")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if planB.Endpoints["https-alt"] == 8443 {
 		t.Fatal("node b must not take node a's port")
 	}
-	planA, err := planReverse(cfg, &cfg.ForeignNodes[0], nil)
+	planA, err := planReverse(cfg, &cfg.ForeignNodes[0], nil, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -133,7 +133,7 @@ func TestApplyReverseIranAndForward(t *testing.T) {
 	other := planTestNode("keep", config.Endpoint{Target: "9.9.9.9:443", Mimic: "tls"})
 	cfg := &config.AppConfig{Role: "iran", ForeignNodes: []config.ForeignNode{n, other}}
 
-	plan, tok, err := applyReverseIran(cfg, "a", nil, "198.51.100.7")
+	plan, tok, err := applyReverseIran(cfg, "a", nil, "198.51.100.7", reverseOpts{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -143,7 +143,7 @@ func TestApplyReverseIranAndForward(t *testing.T) {
 	if cfg.ForeignNodes[1].Reverse {
 		t.Fatal("other nodes must stay in the normal mode")
 	}
-	if _, _, err := applyReverseIran(cfg, "nope", nil, "198.51.100.7"); err == nil {
+	if _, _, err := applyReverseIran(cfg, "nope", nil, "198.51.100.7", reverseOpts{}); err == nil {
 		t.Fatal("unknown alias must fail")
 	}
 
@@ -174,5 +174,40 @@ func TestApplyReverseIranAndForward(t *testing.T) {
 func TestApplyReverseForeignRejectsNormalToken(t *testing.T) {
 	if _, _, err := applyReverseForeign(&config.AppConfig{Role: "foreign"}, "garbage", 0, false); err == nil {
 		t.Fatal("a non-token must be rejected")
+	}
+}
+
+// The SNI and decoy persona of the foreign carry over: SNI lands in the token and the
+// listeners, the decoy on the node, and going back to normal clears the decoy.
+func TestApplyReverseCarriesSNIAndDecoy(t *testing.T) {
+	fakePortsInUse(t)
+	n := planTestNode("a", config.Endpoint{Target: "1.2.3.4:8443", Mimic: "https-alt", ServerName: "old.example"})
+	cfg := &config.AppConfig{Role: "iran", ForeignNodes: []config.ForeignNode{n}}
+
+	// Default: the node's current SNI is kept.
+	plan, _, err := applyReverseIran(cfg, "a", nil, "198.51.100.7", reverseOpts{})
+	if err != nil || plan.SNI != "old.example" || plan.Listeners[0].ServerName != "old.example" {
+		t.Fatalf("current SNI must carry over: %+v err=%v", plan, err)
+	}
+	// Override both.
+	plan, tok, err := applyReverseIran(cfg, "a", nil, "198.51.100.7", reverseOpts{SNI: "new.example", Decoy: "directadmin"})
+	if err != nil || plan.SNI != "new.example" || plan.Listeners[0].ServerName != "new.example" {
+		t.Fatalf("SNI override: %+v err=%v", plan, err)
+	}
+	if cfg.ForeignNodes[0].ReverseDecoyStyle != "directadmin" {
+		t.Fatalf("decoy not stored: %q", cfg.ForeignNodes[0].ReverseDecoyStyle)
+	}
+	fcfg := &config.AppConfig{Role: "foreign"}
+	if _, _, err := applyReverseForeign(fcfg, tok, 0, false); err != nil {
+		t.Fatal(err)
+	}
+	if fcfg.ReverseTargets[0].ServerName != "new.example" {
+		t.Fatalf("the foreign must send the SNI: %+v", fcfg.ReverseTargets)
+	}
+	if _, _, err := applyReverseIran(cfg, "a", nil, "198.51.100.7", reverseOpts{Decoy: "nginx"}); err == nil {
+		t.Fatal("an unknown decoy style must be rejected")
+	}
+	if err := applyForwardIran(cfg, "a"); err != nil || cfg.ForeignNodes[0].ReverseDecoyStyle != "" {
+		t.Fatalf("forward must clear the decoy: %v %q", err, cfg.ForeignNodes[0].ReverseDecoyStyle)
 	}
 }

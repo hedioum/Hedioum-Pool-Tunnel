@@ -60,6 +60,12 @@ hedioum-tunnel reverse-foreign --forward                # on the foreign
   current endpoint ports; a port that is already taken on the hub (another service, or
   another reverse node) is replaced by a free one automatically and reported. Pass
   `--ports` to choose them yourself (an explicit port that is taken is an error).
+- **Camouflage carries over.** The SNI the foreign sends (from the node's endpoints, or
+  `--sni`) is also the name the hub's listener certificate is issued for, and the decoy
+  shown to unauthorized probes can mirror the foreign's (`--decoy-style apache|directadmin`,
+  default: the hub's own). Both are also asked in the interactive menu. Run
+  `reverse-iran --alias NAME --sni <the foreign's SNI> --decoy-style <the foreign's style>`
+  to make the hub look like the foreign it stands in for.
 - **Certificate.** Self-signed by default. Set `domain` (and optionally `acme_email`) in
   the hub config to serve a real Let's Encrypt certificate, as the foreign does.
 - **Authentication.** Unchanged and mutual: the foreign proves the token to the hub and the

@@ -1,6 +1,7 @@
 package ingress
 
 import (
+	"crypto/tls"
 	"io"
 	"net"
 	"strconv"
@@ -136,5 +137,52 @@ func TestReverseWrongTokenIsRejected(t *testing.T) {
 	time.Sleep(4 * time.Second)
 	if st := hm.GetStats("rev2"); st.ActiveConns != 0 {
 		t.Fatalf("a foreign with the wrong token must not be adopted: %+v", st)
+	}
+}
+
+// The hub's reverse listener presents a certificate issued for the node's SNI (so the
+// name a passive observer sees matches the SNI the foreign sends), and a node's decoy
+// style overrides the hub's.
+func TestReverseListenerCertMatchesSNIAndDecoyStyle(t *testing.T) {
+	old := reverseCertDir
+	reverseCertDir = t.TempDir()
+	t.Cleanup(func() { reverseCertDir = old })
+
+	port := freePort(t)
+	node := config.ForeignNode{
+		Alias: "snirev", AuthToken: reverseTestToken, Reverse: true,
+		ReverseListeners:  []config.MimicListener{{Type: "tls", Port: port, ServerName: "files.example.test"}},
+		ReverseDecoyStyle: "directadmin",
+		MinConnections:    1, MaxConnections: 3, BandwidthLimitMbps: 100, BandwidthJitterMbps: 5,
+	}
+	cfg := &config.AppConfig{Role: "iran", DecoyStyle: "apache", ForeignNodes: []config.ForeignNode{node}}
+	hm := pool.NewHubManager()
+	hm.RegisterReverseNode(node)
+	startReverseListeners(cfg, hm)
+
+	var cn string
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		c, err := tls.Dial("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)),
+			&tls.Config{ServerName: "files.example.test", InsecureSkipVerify: true})
+		if err == nil {
+			cn = c.ConnectionState().PeerCertificates[0].Subject.CommonName
+			c.Close()
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("no TLS handshake with the reverse listener: %v", err)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if cn != "files.example.test" {
+		t.Fatalf("certificate CN = %q, want the node's SNI", cn)
+	}
+	if got := reverseDecoyStyle(cfg, node); got != "directadmin" {
+		t.Fatalf("node decoy must win over the hub's, got %q", got)
+	}
+	node.ReverseDecoyStyle = ""
+	if got := reverseDecoyStyle(cfg, node); got != "apache" {
+		t.Fatalf("fallback must be the hub's decoy, got %q", got)
 	}
 }

@@ -150,6 +150,10 @@ type ForeignNode struct {
 	// node has no Endpoints to dial.
 	Reverse          bool            `json:"reverse,omitempty"`
 	ReverseListeners []MimicListener `json:"reverse_listeners,omitempty"`
+	// ReverseDecoyStyle is the decoy persona ("apache" | "directadmin") the hub's reverse
+	// listeners show to unauthorized probes, so the hub looks like the foreign it
+	// stands in for. Empty = the hub's own decoy_style.
+	ReverseDecoyStyle string `json:"reverse_decoy_style,omitempty"`
 }
 
 // getConfigPath determines the storage destination for the configuration.
