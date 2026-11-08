@@ -273,10 +273,35 @@ func runForeignFrontProxyMenu(cfg *config.AppConfig) {
 			return
 		}
 		portStr := "443"
-		_ = survey.AskOne(&survey.Input{Message: "Public port the proxy listens on:", Default: "443"}, &portStr)
+		_ = survey.AskOne(&survey.Input{Message: "Public port the proxy listens on (what the hub dials):", Default: "443"}, &portStr)
 		port, err := strconv.Atoi(strings.TrimSpace(portStr))
 		if err != nil || validPort(port) != nil {
 			color.Red("[x] Invalid port.")
+			return
+		}
+		// The tunnel's own (local) port: the proxy forwards to it, so it must differ from
+		// the proxy's public port when both run on this host.
+		curLocal := 0
+		for _, m := range cfg.Mimics {
+			if m.Type == ty {
+				curLocal = m.Port
+			}
+		}
+		if curLocal == port || curLocal == 0 {
+			curLocal = 8443
+			if port == 8443 {
+				curLocal = 2053
+			}
+		}
+		localStr := strconv.Itoa(curLocal)
+		_ = survey.AskOne(&survey.Input{Message: "Port the tunnel listens on locally (the proxy forwards to it):", Default: localStr}, &localStr)
+		localPort, lerr := strconv.Atoi(strings.TrimSpace(localStr))
+		if lerr != nil || validPort(localPort) != nil {
+			color.Red("[x] Invalid port.")
+			return
+		}
+		if localPort == port {
+			color.Red("[x] The local port must differ from the proxy's public port (%d).", port)
 			return
 		}
 		pp := false
@@ -290,6 +315,9 @@ func runForeignFrontProxyMenu(cfg *config.AppConfig) {
 		for i := range cfg.Mimics {
 			if cfg.Mimics[i].Type != "ssh" {
 				cfg.Mimics[i].ServerName = sni
+			}
+			if cfg.Mimics[i].Type == ty {
+				cfg.Mimics[i].Port = localPort
 			}
 		}
 		warns, aerr := applyForeignFrontProxy(cfg, foreignProxyOpts{Bind: &bind, ProxyProtocol: &pp, Advertise: map[string]int{ty: port}, AdvertiseSet: true})

@@ -38,6 +38,18 @@ These are remembered; a later edit keeps them unless you change them. `front-pro
 prints the proxy configuration (it only prints, it never edits your files); the
 interactive menu asks the same questions.
 
+## In the interactive menu
+
+Everything below can be set without remembering flags. Hub menu: **12. Advanced Settings**;
+foreign menu: **9. Advanced Settings**. Each entry shows whether it is ON or OFF and is off
+unless you turn it on:
+
+- Hub: front proxy for normal nodes (the port and SNI the hub dials), front proxy for
+  reverse nodes (turn on or off, or print the nginx / HAProxy config, optionally routed by
+  the foreign's IP), and the shared reverse listener switch.
+- Foreign: front proxy (public port, local listener port, SNI, PROXY protocol, loopback
+  bind), the pairing token for the hub, and the reverse hubs with their pipe ranges.
+
 ## Foreign (direct mode)
 
 ```

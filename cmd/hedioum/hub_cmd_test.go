@@ -135,3 +135,46 @@ func TestReverseForeignResetsHubs(t *testing.T) {
 		t.Fatalf("--forward must clear every hub: %+v", cfg)
 	}
 }
+
+func TestSetNodeBehindProxy(t *testing.T) {
+	node := config.ForeignNode{Alias: "n", Endpoints: []config.Endpoint{
+		{Target: "203.0.113.5:22", Mimic: "ssh"},
+		{Target: "203.0.113.5:8443", Mimic: "https-alt", ServerName: "old.example.com"},
+		{Target: "203.0.113.5:465", Mimic: "smtps", ServerName: "old.example.com"},
+	}}
+	if err := setNodeBehindProxy(&node, "https-alt", 443, "t.example.com"); err != nil {
+		t.Fatal(err)
+	}
+	if ep := node.Endpoints[1]; ep.Target != "203.0.113.5:443" || ep.ServerName != "t.example.com" {
+		t.Fatalf("endpoint not updated: %+v", ep)
+	}
+	if node.Endpoints[0].Target != "203.0.113.5:22" || node.Endpoints[2].Target != "203.0.113.5:465" || node.Endpoints[2].ServerName != "old.example.com" {
+		t.Fatalf("other endpoints must be untouched: %+v", node.Endpoints)
+	}
+	for name, fn := range map[string]func() error{
+		"ssh":      func() error { return setNodeBehindProxy(&node, "ssh", 443, "x") },
+		"no sni":   func() error { return setNodeBehindProxy(&node, "https-alt", 443, "") },
+		"bad port": func() error { return setNodeBehindProxy(&node, "https-alt", 0, "x") },
+		"no mimic": func() error { return setNodeBehindProxy(&node, "imaps", 443, "x") },
+		"reverse":  func() error { rn := node; rn.Reverse = true; return setNodeBehindProxy(&rn, "https-alt", 443, "x") },
+	} {
+		if err := fn(); err == nil {
+			t.Errorf("%s must be rejected", name)
+		}
+	}
+}
+
+func TestNodeBehindProxyAndForeignProxyState(t *testing.T) {
+	direct := config.ForeignNode{Endpoints: []config.Endpoint{{Target: "1.2.3.4:8443", Mimic: "https-alt", ServerName: "x.example.com"}}}
+	proxied := config.ForeignNode{Endpoints: []config.Endpoint{{Target: "1.2.3.4:443", Mimic: "https-alt", ServerName: "x.example.com"}}}
+	noSNI := config.ForeignNode{Endpoints: []config.Endpoint{{Target: "1.2.3.4:443", Mimic: "https-alt"}}}
+	if nodeBehindProxy(direct) || !nodeBehindProxy(proxied) || nodeBehindProxy(noSNI) {
+		t.Fatalf("direct=%v proxied=%v noSNI=%v", nodeBehindProxy(direct), nodeBehindProxy(proxied), nodeBehindProxy(noSNI))
+	}
+	if foreignProxyOn(&config.AppConfig{}) {
+		t.Error("a plain foreign has no front proxy")
+	}
+	if !foreignProxyOn(&config.AppConfig{AdvertisePorts: map[string]int{"tls": 443}}) || !foreignProxyOn(&config.AppConfig{ListenBind: "127.0.0.1"}) {
+		t.Error("advertised ports or a loopback bind mean the proxy is on")
+	}
+}
