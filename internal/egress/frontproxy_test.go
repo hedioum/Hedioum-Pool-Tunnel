@@ -100,3 +100,33 @@ func TestForeignListenerBindsToConfiguredAddress(t *testing.T) {
 		t.Fatal("the port must already be bound on 127.0.0.1")
 	}
 }
+
+// The SSH mimic cannot be routed by a front proxy (no SNI), so a loopback bind and the
+// PROXY requirement leave it alone: it keeps listening on every interface.
+func TestSSHListenerIgnoresFrontProxyBind(t *testing.T) {
+	port := freeLoopbackPort(t)
+	cfg := &config.AppConfig{Role: "foreign", AuthToken: frontProxyToken, DecoyStyle: "apache", ListenBind: "127.0.0.1", ProxyProtocol: true}
+	certMgr, err := tlscert.NewCertManager(t.TempDir(), "", "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	go startMimicListener(cfg, config.MimicListener{Type: "ssh", Port: port}, securestream.NewReplayFilter(0), certMgr)
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		c, err := net.DialTimeout("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)), 200*time.Millisecond)
+		if err == nil {
+			c.Close()
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("ssh listener did not come up: %v", err)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	// Another loopback address can still bind the port only if the listener is bound to
+	// 127.0.0.1 alone; a wildcard listener makes this fail.
+	if l, err := net.Listen("tcp", net.JoinHostPort("127.0.0.2", strconv.Itoa(port))); err == nil {
+		l.Close()
+		t.Fatal("the SSH listener must stay on all interfaces, not on the proxy's loopback address")
+	}
+}

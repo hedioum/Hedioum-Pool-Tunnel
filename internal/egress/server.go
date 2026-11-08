@@ -112,8 +112,13 @@ func startMimicListener(cfg *config.AppConfig, ml config.MimicListener, filter *
 	}
 
 	// Dual-stack listen (":port") so an Iran hub can reach us over IPv4 or IPv6, unless a
-	// front proxy is configured (cfg.ListenBind, e.g. 127.0.0.1).
-	listenAddr := net.JoinHostPort(cfg.ListenBind, strconv.Itoa(ml.Port))
+	// front proxy is configured (cfg.ListenBind, e.g. 127.0.0.1). The SSH mimic is never
+	// bound to it: a proxy cannot route SSH (there is no SNI), so it keeps its public port.
+	bind := cfg.ListenBind
+	if ml.Type == "ssh" {
+		bind = ""
+	}
+	listenAddr := net.JoinHostPort(bind, strconv.Itoa(ml.Port))
 	listener, err := net.Listen("tcp", listenAddr)
 	if err != nil {
 		slog.Error("failed to bind mimic listener", "type", ml.Type, "addr", listenAddr, "err", err)

@@ -110,16 +110,21 @@ func TestForeignTokenAndSnippet(t *testing.T) {
 	}
 }
 
-// A foreign whose listeners are bound to loopback has nothing to open on the host
-// firewall; a normal one keeps its rules.
+// A foreign whose listeners are bound to loopback opens nothing for them on the host
+// firewall, except the SSH mimic, which is never bound to the proxy address.
 func TestFirewallSkipsLoopbackBoundForeign(t *testing.T) {
 	cfg := foreignTestCfg()
 	if got := firewallPorts(cfg); len(got) == 0 {
 		t.Fatal("a normal foreign must open its listener ports")
 	}
 	cfg.ListenBind = "127.0.0.1"
-	if got := firewallPorts(cfg); len(got) != 0 {
-		t.Fatalf("a loopback-bound foreign must open nothing, got %v", got)
+	got := firewallPorts(cfg)
+	for _, p := range got {
+		for _, m := range cfg.Mimics {
+			if m.Port == p && m.Type != "ssh" {
+				t.Fatalf("a loopback-bound %s listener must not be opened, got %v", m.Type, got)
+			}
+		}
 	}
 }
 

@@ -20,7 +20,9 @@ Rules of thumb:
 - The tunnel's SNI must not be a name your other services use, otherwise the proxy cannot
   tell them apart. Any name works (it needs no DNS record and no certificate).
 - One SNI maps to one listener, so behind a proxy a server fronts one mimic type per
-  public port. SSH cannot be routed by SNI.
+  public port. SSH cannot be routed by SNI, so the SSH mimic is left alone: `--bind` and
+  `--proxy-protocol` never apply to it, and it keeps listening on its own public port (the
+  usual 22) while the other mimics sit behind the proxy.
 
 Four settings on the foreign:
 
