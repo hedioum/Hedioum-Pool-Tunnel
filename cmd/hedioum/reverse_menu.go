@@ -252,9 +252,15 @@ func runReverseForeignMenu(cfg *config.AppConfig) {
 		var choice string
 		_ = survey.AskOne(&survey.Select{
 			Message: "What now?",
-			Options: []string{"Switch back to the normal mode", "Paste a new reverse token", "Cancel"},
+			Options: []string{"Add another hub (dial a second Iran server)", "Hubs: show / change pipe range / remove", "Switch back to the normal mode", "Paste a new reverse token", "Cancel"},
 		}, &choice)
 		switch {
+		case strings.HasPrefix(choice, "Add another"):
+			addHubMenu(cfg)
+			return
+		case strings.HasPrefix(choice, "Hubs:"):
+			manageHubsMenu(cfg)
+			return
 		case strings.HasPrefix(choice, "Switch back"):
 			if err := applyForwardForeign(cfg); err != nil {
 				color.Red("[x] %v", err)
@@ -303,6 +309,108 @@ func runReverseForeignMenu(cfg *config.AppConfig) {
 	}
 	color.Green("[✓] Reverse mode on: dialing the hub across %d endpoint(s).", n)
 	commitReverse(cfg)
+}
+
+// pastedToken reads a pairing token from the prompt, accepting the whole pasted command.
+func pastedToken(msg string) string {
+	var token string
+	if err := survey.AskOne(&survey.Input{Message: msg}, &token); err != nil {
+		return ""
+	}
+	token = strings.TrimSpace(token)
+	if i := strings.LastIndex(token, " "); i >= 0 {
+		token = token[i+1:]
+	}
+	return token
+}
+
+func askInt(msg string, def int) (int, bool) {
+	s := strconv.Itoa(def)
+	if err := survey.AskOne(&survey.Input{Message: msg, Default: s}, &s); err != nil {
+		return 0, false
+	}
+	n, err := strconv.Atoi(strings.TrimSpace(s))
+	if err != nil || n < 1 {
+		color.Red("[x] Enter a positive number.")
+		return 0, false
+	}
+	return n, true
+}
+
+// addHubMenu makes the foreign dial one more hub.
+func addHubMenu(cfg *config.AppConfig) {
+	token := pastedToken("Reverse token from the other hub (reverse-iran on that hub):")
+	if token == "" {
+		return
+	}
+	var name string
+	_ = survey.AskOne(&survey.Input{Message: "A label for this hub (Enter = its IP):"}, &name)
+	min, ok := askInt("Pipes always kept open to this hub (minimum):", config.DefaultReverseConns)
+	if !ok {
+		return
+	}
+	max, ok := askInt("Most pipes under load (maximum; same as minimum = fixed):", min)
+	if !ok {
+		return
+	}
+	hub, err := applyAddHub(cfg, token, strings.TrimSpace(name), min, max, false)
+	if err != nil {
+		color.Red("[x] %v", err)
+		return
+	}
+	color.Green("[✓] Hub %q added: %s.", hub.Name, pipeRangeText(hub))
+	color.Yellow("    Keep that hub node's max_connections at or above the maximum.")
+	commitReverse(cfg)
+}
+
+// manageHubsMenu lists the hubs and lets the operator change a pipe range or remove one.
+func manageHubsMenu(cfg *config.AppConfig) {
+	hubs := cfg.EffectiveReverseHubs()
+	if len(hubs) == 0 {
+		return
+	}
+	var labels []string
+	byLabel := map[string]string{}
+	for _, h := range hubs {
+		l := fmt.Sprintf("%s  [%s]", h.Name, pipeRangeText(h))
+		labels = append(labels, l)
+		byLabel[l] = h.Name
+	}
+	var picked string
+	if err := survey.AskOne(&survey.Select{Message: "Which hub?", Options: labels}, &picked); err != nil {
+		return
+	}
+	name := byLabel[picked]
+	var act string
+	_ = survey.AskOne(&survey.Select{Message: "Hub " + name, Options: []string{"Change pipe range", "Remove this hub", "Cancel"}}, &act)
+	switch {
+	case strings.HasPrefix(act, "Change"):
+		cur := hubs[0]
+		for _, h := range hubs {
+			if h.Name == name {
+				cur = h
+			}
+		}
+		min, ok := askInt("Minimum pipes:", cur.MinConns)
+		if !ok {
+			return
+		}
+		max, ok := askInt("Maximum pipes:", cur.MaxConns)
+		if !ok {
+			return
+		}
+		if err := applyEditHub(cfg, name, min, max); err != nil {
+			color.Red("[x] %v", err)
+			return
+		}
+		commitReverse(cfg)
+	case strings.HasPrefix(act, "Remove"):
+		if err := applyRemoveHub(cfg, name); err != nil {
+			color.Red("[x] %v", err)
+			return
+		}
+		commitReverse(cfg)
+	}
 }
 
 // askFrontProxy asks whether an nginx / HAProxy sits in front of the public port and

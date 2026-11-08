@@ -128,7 +128,7 @@ func runInteractiveDashboard(cfg *config.AppConfig) {
 				}
 				fmt.Printf(" ├─ Persona     : %s (%d mimics)\n", personaLabel, len(cfg.Mimics))
 				if len(cfg.ReverseTargets) > 0 {
-					fmt.Printf(" ├─ Mode        : %s (dials the hub, %d endpoint(s))\n", color.HiYellowString("REVERSE"), len(cfg.ReverseTargets))
+					fmt.Printf(" ├─ Mode        : %s (dials %d hub(s), %d endpoint(s))\n", color.HiYellowString("REVERSE"), len(cfg.EffectiveReverseHubs()), len(cfg.ReverseTargets))
 				}
 				fmt.Printf(" ├─ Listen Port : %d\n", cfg.ForeignListenPort)
 				fmt.Printf(" └─ Auth Token  : %s\n", color.HiYellowString(cfg.AuthToken))

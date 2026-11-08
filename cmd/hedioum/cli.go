@@ -29,6 +29,14 @@ func runSubcommand(name string, args []string) {
 		cmdRemoveNode(args)
 	case "edit-foreign":
 		cmdEditForeign(args)
+	case "add-hub":
+		cmdAddHub(args)
+	case "edit-hub":
+		cmdEditHub(args)
+	case "remove-hub":
+		cmdRemoveHub(args)
+	case "list-hubs":
+		cmdListHubs(args)
 	case "reverse-shared-auth":
 		cmdReverseSharedAuth(args)
 	case "front-proxy":
@@ -102,6 +110,10 @@ Usage:
       dialing the foreign) and print a reverse pairing token; --forward flips it back
       Behind nginx/HAProxy on a shared port: --sni NAME --advertise-ports TYPE=443
       --bind 127.0.0.1 [--proxy-protocol]  (settings are remembered per node)
+  hedioum-tunnel add-hub --token T [--name N] [--min 12] [--max 24] (foreign, reverse mode)
+      Dial one more Iran hub with its own pipe range: at least --min pipes always, up to
+      --max under load. Also: edit-hub --name N [--min --max], remove-hub --name N, list-hubs.
+      Bandwidth/jitter stay on each hub's node (edit-node there).
   hedioum-tunnel reverse-shared-auth [--on|--off]
       Advanced (hub, default off): let several reverse nodes share ONE listener / SNI; the
       hub tells them apart by token. Join a node with reverse-iran --alias NEW --share-with OLD

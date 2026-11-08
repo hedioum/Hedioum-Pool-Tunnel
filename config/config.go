@@ -75,6 +75,12 @@ type AppConfig struct {
 	// ReverseOnly skips the foreign's inbound camouflage listeners entirely: no port
 	// is exposed, the node only dials out.
 	ReverseOnly bool `json:"reverse_only,omitempty"`
+	// ReverseHubs lets one foreign dial several Iran hubs, each with its own pipe
+	// range. When set it takes precedence over ReverseTargets/ReverseConns, which are
+	// then kept as the union of the hubs' targets and the sum of their minimums so an
+	// older binary still dials something sensible. Empty = the single hub described by
+	// ReverseTargets/ReverseConns (every config written before this field existed).
+	ReverseHubs []ReverseHub `json:"reverse_hubs,omitempty"`
 
 	// Iran Node specific properties
 	ForeignNodes []ForeignNode `json:"foreign_nodes,omitempty"`
@@ -86,6 +92,69 @@ type AppConfig struct {
 	// a front proxy that routes by SNI) has to carry several foreign servers. With it
 	// off every reverse node needs its own port, exactly as before.
 	SharedReverseAuth bool `json:"shared_reverse_auth,omitempty"`
+}
+
+// ReverseHub is one Iran hub a reverse foreign dials. The foreign is the side that
+// dials, so the pipe range lives here: it keeps at least MinConns pipes open to this
+// hub and opens more, up to MaxConns, while the hub's streams keep the pipes busy.
+// Bandwidth and jitter shaping stay on the hub's node (they apply to its sessions).
+type ReverseHub struct {
+	Name    string     `json:"name"`
+	Targets []Endpoint `json:"targets"`
+	// AuthToken is the node token this hub knows the foreign by. Empty = the foreign's
+	// own auth_token (the usual case: one token paired with every hub).
+	AuthToken string `json:"auth_token,omitempty"`
+	MinConns  int    `json:"min_conns,omitempty"` // pipes always kept open (default 12)
+	MaxConns  int    `json:"max_conns,omitempty"` // upper bound under load (default = MinConns, i.e. fixed)
+}
+
+// DefaultReverseConns is the pipe count of a reverse hub when none is set: 10 TCP + the
+// 2 the hub dedicates to its UDP sub-pool.
+const DefaultReverseConns = 12
+
+// EffectiveReverseHubs returns the hubs this foreign dials, with defaults applied:
+// ReverseHubs when set, else the single hub described by the legacy
+// ReverseTargets/ReverseConns fields (named "default").
+func (c *AppConfig) EffectiveReverseHubs() []ReverseHub {
+	var hubs []ReverseHub
+	if len(c.ReverseHubs) > 0 {
+		hubs = append(hubs, c.ReverseHubs...)
+	} else if len(c.ReverseTargets) > 0 {
+		hubs = []ReverseHub{{Name: "default", Targets: c.ReverseTargets, MinConns: c.ReverseConns, MaxConns: c.ReverseConns}}
+	}
+	for i := range hubs {
+		if hubs[i].MinConns < 1 {
+			hubs[i].MinConns = DefaultReverseConns
+		}
+		if hubs[i].MaxConns < hubs[i].MinConns {
+			hubs[i].MaxConns = hubs[i].MinConns
+		}
+		if hubs[i].AuthToken == "" {
+			hubs[i].AuthToken = c.AuthToken
+		}
+	}
+	return hubs
+}
+
+// SyncReverseCompat refreshes the legacy ReverseTargets/ReverseConns from ReverseHubs
+// (union of targets, sum of minimums). Call it after changing ReverseHubs.
+func (c *AppConfig) SyncReverseCompat() {
+	if len(c.ReverseHubs) == 0 {
+		return
+	}
+	var targets []Endpoint
+	seen := map[string]bool{}
+	conns := 0
+	for _, h := range c.EffectiveReverseHubs() {
+		conns += h.MinConns
+		for _, ep := range h.Targets {
+			if k := ep.Mimic + "|" + ep.Target; !seen[k] {
+				seen[k] = true
+				targets = append(targets, ep)
+			}
+		}
+	}
+	c.ReverseTargets, c.ReverseConns = targets, conns
 }
 
 // MimicListener is one camouflage listener on the foreign node.
@@ -244,6 +313,9 @@ func parseConfig(data []byte) (*AppConfig, error) {
 		}}
 	}
 
+	if cfg.Role == "foreign" {
+		cfg.SyncReverseCompat()
+	}
 	if cfg.Role == "foreign" && len(cfg.ReverseTargets) > 0 && cfg.ReverseConns == 0 {
 		cfg.ReverseConns = 12 // 10 TCP + 2 UDP, matching the hub's default sub-pool sizes
 	}
