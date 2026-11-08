@@ -76,7 +76,7 @@ func TestPlanReverseMovesTakenPorts(t *testing.T) {
 		config.Endpoint{Target: "1.2.3.4:8443", Mimic: "https-alt"},
 	)
 	cfg := &config.AppConfig{Role: "iran", ForeignNodes: []config.ForeignNode{n}}
-	plan, err := planReverse(cfg, &cfg.ForeignNodes[0], nil, "")
+	plan, err := planReverseFor(cfg, &cfg.ForeignNodes[0], nil, "", true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -209,5 +209,41 @@ func TestApplyReverseCarriesSNIAndDecoy(t *testing.T) {
 	}
 	if err := applyForwardIran(cfg, "a"); err != nil || cfg.ForeignNodes[0].ReverseDecoyStyle != "" {
 		t.Fatalf("forward must clear the decoy: %v %q", err, cfg.ForeignNodes[0].ReverseDecoyStyle)
+	}
+}
+
+// A node flipped to reverse gets ONE listener, the TLS mimic, whatever its own mimic set
+// is: every extra public listener on the hub is one more port to probe, and SSH cannot be
+// used in reverse. Extra types are opt-in and a re-plan keeps what the node already has.
+func TestPlanReverseDefaultsToOneTLSListener(t *testing.T) {
+	fakePortsInUse(t)
+	n := planTestNode("a",
+		config.Endpoint{Target: "1.2.3.4:22", Mimic: "ssh"},
+		config.Endpoint{Target: "1.2.3.4:465", Mimic: "smtps"},
+		config.Endpoint{Target: "1.2.3.4:8443", Mimic: "https-alt"},
+	)
+	cfg := &config.AppConfig{Role: "iran", ForeignNodes: []config.ForeignNode{n}}
+	plan, err := planReverse(cfg, &cfg.ForeignNodes[0], nil, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plan.Listeners) != 1 || plan.Listeners[0].Type != "tls" {
+		t.Fatalf("default must be a single tls listener, got %+v", plan.Listeners)
+	}
+	// Opt in to more by naming them, or take the node's whole set.
+	plan, err = planReverse(cfg, &cfg.ForeignNodes[0], map[string]int{"smtps": 465}, "")
+	if err != nil || len(plan.Listeners) != 2 || plan.Endpoints["smtps"] != 465 || plan.Endpoints["tls"] == 0 {
+		t.Fatalf("a named type must be added: %+v err=%v", plan.Endpoints, err)
+	}
+	plan, err = planReverseFor(cfg, &cfg.ForeignNodes[0], nil, "", true)
+	if err != nil || len(plan.Listeners) != 2 || plan.Endpoints["smtps"] == 0 || plan.Endpoints["https-alt"] == 0 {
+		t.Fatalf("all types must be the node's own set minus ssh: %+v err=%v", plan.Endpoints, err)
+	}
+	// A node that is already reverse keeps the listener types it has.
+	cfg.ForeignNodes[0].Reverse = true
+	cfg.ForeignNodes[0].ReverseListeners = []config.MimicListener{{Type: "smtps", Port: 465}, {Type: "https-alt", Port: 8443}}
+	plan, err = planReverse(cfg, &cfg.ForeignNodes[0], nil, "")
+	if err != nil || len(plan.Listeners) != 2 || plan.Endpoints["smtps"] == 0 || plan.Endpoints["https-alt"] == 0 {
+		t.Fatalf("a re-plan must keep the node's reverse types: %+v err=%v", plan.Endpoints, err)
 	}
 }

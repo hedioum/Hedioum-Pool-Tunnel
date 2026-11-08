@@ -121,18 +121,52 @@ func findNode(cfg *config.AppConfig, alias string) *config.ForeignNode {
 // is taken on this host (or by another reverse node) is moved to a free candidate
 // automatically; an explicit override that is taken is an error.
 func planReverse(cfg *config.AppConfig, node *config.ForeignNode, overrides map[string]int, sni string) (reversePlan, error) {
-	var types []string
+	return planReverseFor(cfg, node, overrides, sni, false)
+}
+
+// planReverseFor is planReverse with the choice of listener set. By default a node that
+// is flipped to reverse gets ONE listener, the TLS mimic (normally on 443, behind a front
+// proxy if the port is shared): every extra public listener on the hub is one more port
+// to probe, and in reverse mode only a TLS-type pipe is useful anyway (SSH cannot be
+// used). Extra types are opt-in: naming them in --ports, or
+// all of the node's own set with allTypes (--all-mimics). A node that is already reverse
+// keeps the types it has.
+func planReverseFor(cfg *config.AppConfig, node *config.ForeignNode, overrides map[string]int, sni string, allTypes bool) (reversePlan, error) {
+	var nodeTypes []string
 	for _, e := range node.Endpoints {
-		types = append(types, e.Mimic)
+		nodeTypes = append(nodeTypes, e.Mimic)
 	}
-	types = reverseCapableTypes(types)
-	if len(types) == 0 {
+	nodeTypes = reverseCapableTypes(nodeTypes)
+	if len(nodeTypes) == 0 {
 		resolved, err := persona.Resolve(persona.Auto(node.AuthToken), node.AuthToken)
 		if err != nil {
 			return reversePlan{}, fmt.Errorf("cannot derive a reverse mimic set: %v", err)
 		}
-		types = reverseCapableTypes(resolved)
+		nodeTypes = reverseCapableTypes(resolved)
 	}
+	var types []string
+	switch {
+	case allTypes:
+		types = nodeTypes
+	case node.Reverse && len(node.ReverseListeners) > 0:
+		for _, l := range node.ReverseListeners {
+			types = append(types, l.Type)
+		}
+	default:
+		types = []string{"tls"}
+	}
+	have := map[string]bool{}
+	for _, ty := range types {
+		have[ty] = true
+	}
+	extra := make([]string, 0, len(overrides))
+	for ty := range overrides {
+		if !have[ty] {
+			extra = append(extra, ty)
+		}
+	}
+	sort.Strings(extra)
+	types = append(types, extra...)
 
 	ports := currentNodePorts(*node)
 	usedByOthers := map[int]string{}
@@ -241,6 +275,8 @@ func resolveHubIP(given string) (string, error) {
 type reverseOpts struct {
 	SNI   string // TLS SNI the foreign sends and the hub's certificate is issued for
 	Decoy string // decoy persona for unauthorized probes: apache | directadmin
+	// AllTypes opens a listener for every mimic type of the node instead of the TLS one.
+	AllTypes bool
 }
 
 func validDecoyStyle(s string) error {
@@ -260,7 +296,7 @@ func applyReverseIran(cfg *config.AppConfig, alias string, overrides map[string]
 	if err := validDecoyStyle(opts.Decoy); err != nil {
 		return reversePlan{}, "", err
 	}
-	plan, err := planReverse(cfg, node, overrides, opts.SNI)
+	plan, err := planReverseFor(cfg, node, overrides, opts.SNI, opts.AllTypes)
 	if err != nil {
 		return reversePlan{}, "", err
 	}
@@ -373,6 +409,7 @@ func cmdReverseIran(args []string) {
 	publicIP := fs.String("public-ip", "", "this hub's public IP to embed in the token (auto-detected if empty)")
 	sni := fs.String("sni", "", "TLS SNI the foreign sends and the hub's certificate is issued for (default: the node's current SNI)")
 	decoy := fs.String("decoy-style", "", "decoy shown to unauthorized probes: apache|directadmin (default: the node's, else the hub's)")
+	allMimics := fs.Bool("all-mimics", false, "open a listener for every mimic type of the node (default: one TLS listener; name extra types in --ports)")
 	forward := fs.Bool("forward", false, "flip the node back to the normal mode (the hub dials the foreign)")
 	_ = fs.Parse(args)
 
@@ -402,7 +439,7 @@ func cmdReverseIran(args []string) {
 	if err != nil {
 		fail("--ports: %v", err)
 	}
-	plan, tok, err := applyReverseIran(cfg, *alias, overrides, *publicIP, reverseOpts{SNI: *sni, Decoy: *decoy})
+	plan, tok, err := applyReverseIran(cfg, *alias, overrides, *publicIP, reverseOpts{SNI: *sni, Decoy: *decoy, AllTypes: *allMimics})
 	if err != nil {
 		fail("%v", err)
 	}

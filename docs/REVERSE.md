@@ -52,9 +52,13 @@ hedioum-tunnel reverse-foreign --forward                # on the foreign
 
 ## Details
 
-- **Mimics.** The hub listens with the node's own mimic set (so both ends keep the same
-  camouflage), minus `ssh`: an SSH mimic needs a real `sshd` as its decoy and port 22 is
-  normally taken on the hub. Any TLS/STARTTLS mimic (`tls`, `https-alt`, `smtps`, `imaps`,
+- **Mimics.** By default the hub opens **one** listener, the `tls` mimic (port 443 when it
+  is free). Every extra public listener is one more port a censor can probe, and the point
+  of reverse mode is to look like one ordinary HTTPS service. `ssh` is never used in
+  reverse: an SSH mimic needs a real `sshd` as its decoy and port 22 is normally taken on
+  the hub. More listeners are opt-in: name them with `--ports smtps=465,...`, or take all of
+  the node's own mimic set with `--all-mimics`. A node that is already reverse keeps the
+  listener types it has. Any TLS/STARTTLS mimic (`tls`, `https-alt`, `smtps`, `imaps`,
   `smtp`, `imap`, `cpanel`, …) works. Unauthorized probes on a hub listener get the same
   decoy a probe on a foreign listener gets. By default the listeners use the node's
   current endpoint ports; a port that is already taken on the hub (another service, or

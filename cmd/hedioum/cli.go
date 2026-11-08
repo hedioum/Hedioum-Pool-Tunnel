@@ -94,7 +94,7 @@ Usage:
       --source-ips routes the hub by its address so the tunnel can share an SNI with a real service
   hedioum-tunnel pairing-token [--public-ip IP]
       (foreign) Print the paste-only pairing token for the hub, honoring --advertise-ports
-  hedioum-tunnel reverse-iran --alias NAME [--ports tls=443,...] [--public-ip IP] [--forward]
+  hedioum-tunnel reverse-iran --alias NAME [--ports tls=443,...] [--all-mimics] [--public-ip IP] [--forward]
       Flip an existing node to REVERSE mode (the foreign dials the hub instead of the hub
       dialing the foreign) and print a reverse pairing token; --forward flips it back
   hedioum-tunnel reverse-foreign --token REVERSE_TOKEN [--conns N] [--keep-listeners] [--forward]
