@@ -186,6 +186,7 @@ func cmdEditForeign(args []string) {
 	decoyStyle := fs.String("decoy-style", cfg.DecoyStyle, "camouflage persona: apache|directadmin")
 	egressMode := fs.String("egress-mode", cfg.EgressIPMode, "egress family: ipv4|ipv6|dual")
 	bindIP := fs.String("egress-bind-ip", cfg.EgressBindIP, "egress source IP")
+	upstream := fs.String("egress-upstream", cfg.EgressUpstream, "hand outgoing traffic to a local SOCKS5 proxy (host:port, e.g. 127.0.0.1:10808) instead of dialing directly; '' = direct")
 	httpDecoyPort := fs.Int("http-decoy-port", cfg.HTTPDecoyPort, "plaintext web decoy port (0 disables)")
 	token := fs.String("token", "", "set a specific new auth token (default: keep current)")
 	rotateToken := fs.Bool("rotate-token", false, "generate a fresh auth token")
@@ -211,6 +212,10 @@ func cmdEditForeign(args []string) {
 		if err := validIP(*bindIP); err != nil {
 			fail("--egress-bind-ip: %v", err)
 		}
+	}
+	upstreamNorm, err := config.NormalizeEgressUpstream(*upstream)
+	if err != nil {
+		fail("--egress-upstream: %v", err)
 	}
 	newToken, tokenNote, err := resolveTokenEdit(cfg.AuthToken, *token, *rotateToken)
 	if err != nil {
@@ -279,6 +284,7 @@ func cmdEditForeign(args []string) {
 	cfg.DecoyStyle = *decoyStyle
 	cfg.EgressIPMode = *egressMode
 	cfg.EgressBindIP = *bindIP
+	cfg.EgressUpstream = upstreamNorm
 	hd := *httpDecoyPort
 	if hd == 0 {
 		hd = -1 // sentinel: disabled (0 would be re-defaulted to 80 on load)

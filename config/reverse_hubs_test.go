@@ -57,3 +57,21 @@ func TestSuggestedReverseMaxFor(t *testing.T) {
 		t.Fatalf("a minimum above the suggestion must not be lowered: got %d", got)
 	}
 }
+
+func TestNormalizeEgressUpstream(t *testing.T) {
+	for in, want := range map[string]string{
+		"":                           "",
+		"127.0.0.1:10808":            "127.0.0.1:10808",
+		" socks5://127.0.0.1:10808 ": "127.0.0.1:10808",
+		"[::1]:1080":                 "[::1]:1080",
+	} {
+		if got, err := NormalizeEgressUpstream(in); err != nil || got != want {
+			t.Errorf("%q -> %q, %v (want %q)", in, got, err, want)
+		}
+	}
+	for _, bad := range []string{"10808", "127.0.0.1", "127.0.0.1:0", "127.0.0.1:99999", ":1080", "http://x:1"} {
+		if _, err := NormalizeEgressUpstream(bad); err == nil {
+			t.Errorf("%q must be rejected", bad)
+		}
+	}
+}

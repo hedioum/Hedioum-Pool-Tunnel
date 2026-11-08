@@ -22,7 +22,7 @@ var dialUDP = safeDialUDP
 
 // udpFlow is one connected UDP socket to a single target, with an idle timer.
 type udpFlow struct {
-	conn   *net.UDPConn
+	conn   net.Conn
 	target tunproto.Addr // echoed back as the source of responses
 	timer  *time.Timer
 }

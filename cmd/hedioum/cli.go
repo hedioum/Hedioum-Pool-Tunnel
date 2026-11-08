@@ -82,7 +82,7 @@ Usage:
 
   hedioum-tunnel setup-foreign [flags]   Write the foreign (egress) config
       --listen-port N (default 22)  --decoy-port N (default 2022)
-      --egress-mode ipv4|ipv6|dual  --egress-bind-ip IP  --move-ssh  --token HEX
+      --egress-mode ipv4|ipv6|dual  --egress-bind-ip IP  --egress-upstream HOST:PORT  --move-ssh  --token HEX
 
   hedioum-tunnel edit-foreign [flags]    Edit the foreign config in place (only the
       flags you pass change; token kept unless --token/--rotate-token)
