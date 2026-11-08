@@ -421,6 +421,7 @@ func cmdEditNode(args []string) {
 		BandwidthJitterMbps: *jitter,
 		Reverse:             node.Reverse,
 		ReverseListeners:    node.ReverseListeners,
+		ReverseDecoyStyle:   node.ReverseDecoyStyle,
 	})
 	if err := config.SaveConfig(cfg); err != nil {
 		fail("failed to save config: %v", err)

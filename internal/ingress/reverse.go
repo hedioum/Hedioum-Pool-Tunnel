@@ -1,9 +1,12 @@
 package ingress
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"log/slog"
 	"net"
+	"path/filepath"
 
 	"github.com/hashicorp/yamux"
 	"github.com/hedioum/Hedioum-Pool-Tunnel/config"
@@ -39,25 +42,47 @@ func startReverseListeners(cfg *config.AppConfig, hubManager *pool.HubManager) {
 		return
 	}
 
-	// One certificate manager for all reverse listeners: self-signed by default, or a
-	// real Let's Encrypt cert when cfg.Domain points at this hub.
-	certMgr, err := tlscert.NewCertManager(reverseCertDir, cfg.Domain, cfg.ACMEEmail, cfg.Domain)
-	if err != nil {
-		slog.Error("failed to initialize certificate manager for reverse listeners", "err", err)
-		return
-	}
 	filter := securestream.NewReplayFilter(0)
 
-	style := cfg.DecoyStyle
-	if style == "" {
-		style = "apache"
+	// Certificates: one manager per distinct SNI, so the self-signed cert a probe or a
+	// passive observer sees is issued for the same name the foreign sends as SNI. A
+	// listener without an SNI uses the hub's default (cfg.Domain / localhost). A real
+	// Let's Encrypt cert is only possible when the SNI is the hub's own domain.
+	certMgrs := map[string]*tlscert.CertManager{}
+	certFor := func(sni string) (*tlscert.CertManager, error) {
+		if cm, ok := certMgrs[sni]; ok {
+			return cm, nil
+		}
+		var cm *tlscert.CertManager
+		var err error
+		if sni == "" {
+			cm, err = tlscert.NewCertManager(reverseCertDir, cfg.Domain, cfg.ACMEEmail, cfg.Domain)
+		} else {
+			sum := sha256.Sum256([]byte(sni))
+			dir := filepath.Join(reverseCertDir, "rev-"+hex.EncodeToString(sum[:])[:10])
+			domain := ""
+			if sni == cfg.Domain {
+				domain = cfg.Domain
+			}
+			cm, err = tlscert.NewCertManager(dir, domain, cfg.ACMEEmail, sni)
+		}
+		if err == nil {
+			certMgrs[sni] = cm
+		}
+		return cm, err
 	}
 
 	for _, node := range cfg.ForeignNodes {
 		if !node.Reverse {
 			continue
 		}
+		style := reverseDecoyStyle(cfg, node)
 		for _, ml := range node.ReverseListeners {
+			certMgr, err := certFor(ml.ServerName)
+			if err != nil {
+				slog.Error("failed to initialize certificate for reverse listener", "node", node.Alias, "sni", ml.ServerName, "err", err)
+				continue
+			}
 			m, err := egress.BuildServerMimic(node.AuthToken, style, ml, filter, certMgr)
 			if err != nil {
 				slog.Error("failed to build reverse mimic", "node", node.Alias, "type", ml.Type, "err", err)
@@ -66,6 +91,18 @@ func startReverseListeners(cfg *config.AppConfig, hubManager *pool.HubManager) {
 			go serveReverseListener(node.Alias, ml, m, hubManager)
 		}
 	}
+}
+
+// reverseDecoyStyle is the decoy persona a node's reverse listeners wear: the node's
+// own setting (matching its foreign), else the hub's, else apache.
+func reverseDecoyStyle(cfg *config.AppConfig, node config.ForeignNode) string {
+	switch {
+	case node.ReverseDecoyStyle != "":
+		return node.ReverseDecoyStyle
+	case cfg.DecoyStyle != "":
+		return cfg.DecoyStyle
+	}
+	return "apache"
 }
 
 // serveReverseListener binds one port and adopts every authenticated foreign pipe.

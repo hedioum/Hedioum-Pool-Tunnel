@@ -120,7 +120,7 @@ func findNode(cfg *config.AppConfig, alias string) *config.ForeignNode {
 // SSH, each on the node's current port unless the operator overrode it. A port that
 // is taken on this host (or by another reverse node) is moved to a free candidate
 // automatically; an explicit override that is taken is an error.
-func planReverse(cfg *config.AppConfig, node *config.ForeignNode, overrides map[string]int) (reversePlan, error) {
+func planReverse(cfg *config.AppConfig, node *config.ForeignNode, overrides map[string]int, sni string) (reversePlan, error) {
 	var types []string
 	for _, e := range node.Endpoints {
 		types = append(types, e.Mimic)
@@ -161,7 +161,10 @@ func planReverse(cfg *config.AppConfig, node *config.ForeignNode, overrides map[
 		return !own[p] && portInUse(p)
 	}
 
-	plan := reversePlan{Endpoints: map[string]int{}, Moved: map[string]int{}, SNI: firstEndpointSNI(*node)}
+	if sni == "" {
+		sni = firstEndpointSNI(*node)
+	}
+	plan := reversePlan{Endpoints: map[string]int{}, Moved: map[string]int{}, SNI: sni}
 	inPlan := map[int]string{}
 	chosen := map[string]int{}
 
@@ -233,14 +236,31 @@ func resolveHubIP(given string) (string, error) {
 	return ip, nil
 }
 
+// reverseOpts are the camouflage settings of a reverse node that the operator can set
+// to mirror what the foreign wears. Empty values keep the node's current ones.
+type reverseOpts struct {
+	SNI   string // TLS SNI the foreign sends and the hub's certificate is issued for
+	Decoy string // decoy persona for unauthorized probes: apache | directadmin
+}
+
+func validDecoyStyle(s string) error {
+	if s == "" || s == "apache" || s == "directadmin" {
+		return nil
+	}
+	return fmt.Errorf("decoy style must be apache or directadmin")
+}
+
 // applyReverseIran flips the node to reverse mode in cfg (the caller saves it) and
 // returns the plan plus the reverse pairing token for the foreign.
-func applyReverseIran(cfg *config.AppConfig, alias string, overrides map[string]int, publicIP string) (reversePlan, string, error) {
+func applyReverseIran(cfg *config.AppConfig, alias string, overrides map[string]int, publicIP string, opts reverseOpts) (reversePlan, string, error) {
 	node := findNode(cfg, alias)
 	if node == nil {
 		return reversePlan{}, "", fmt.Errorf("no node with alias %q", alias)
 	}
-	plan, err := planReverse(cfg, node, overrides)
+	if err := validDecoyStyle(opts.Decoy); err != nil {
+		return reversePlan{}, "", err
+	}
+	plan, err := planReverse(cfg, node, overrides, opts.SNI)
 	if err != nil {
 		return reversePlan{}, "", err
 	}
@@ -250,6 +270,9 @@ func applyReverseIran(cfg *config.AppConfig, alias string, overrides map[string]
 	}
 	node.Reverse = true
 	node.ReverseListeners = plan.Listeners
+	if opts.Decoy != "" {
+		node.ReverseDecoyStyle = opts.Decoy
+	}
 	tok := pairing.Encode(pairing.Token{ExitIP: ip, AuthKey: node.AuthToken, SNI: plan.SNI, Endpoints: plan.Endpoints, Reverse: true})
 	return plan, tok, nil
 }
@@ -268,6 +291,7 @@ func applyForwardIran(cfg *config.AppConfig, alias string) error {
 	}
 	node.Reverse = false
 	node.ReverseListeners = nil
+	node.ReverseDecoyStyle = ""
 	return nil
 }
 
@@ -333,6 +357,9 @@ func printReversePlan(alias string, plan reversePlan) {
 			color.Yellow("    %s: port %d is taken on this host, using %d instead.", l.Type, old, l.Port)
 		}
 	}
+	if plan.SNI != "" {
+		color.Green("    SNI: %s", plan.SNI)
+	}
 	color.Yellow("    These ports must be reachable from the foreign server (open them in any")
 	color.Yellow("    provider/network firewall; the host firewall is handled on start).")
 }
@@ -344,6 +371,8 @@ func cmdReverseIran(args []string) {
 	alias := fs.String("alias", "", "node alias to flip (required)")
 	portsSpec := fs.String("ports", "", "listener ports as TYPE=PORT,... (default: the node's endpoint ports; a port taken on this host is replaced by a free one)")
 	publicIP := fs.String("public-ip", "", "this hub's public IP to embed in the token (auto-detected if empty)")
+	sni := fs.String("sni", "", "TLS SNI the foreign sends and the hub's certificate is issued for (default: the node's current SNI)")
+	decoy := fs.String("decoy-style", "", "decoy shown to unauthorized probes: apache|directadmin (default: the node's, else the hub's)")
 	forward := fs.Bool("forward", false, "flip the node back to the normal mode (the hub dials the foreign)")
 	_ = fs.Parse(args)
 
@@ -373,7 +402,7 @@ func cmdReverseIran(args []string) {
 	if err != nil {
 		fail("--ports: %v", err)
 	}
-	plan, tok, err := applyReverseIran(cfg, *alias, overrides, *publicIP)
+	plan, tok, err := applyReverseIran(cfg, *alias, overrides, *publicIP, reverseOpts{SNI: *sni, Decoy: *decoy})
 	if err != nil {
 		fail("%v", err)
 	}

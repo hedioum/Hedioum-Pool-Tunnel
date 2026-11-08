@@ -33,6 +33,14 @@ func nodeModeLabel(n config.ForeignNode) string {
 	return "normal"
 }
 
+// reverseDecoyChoice is the menu's default decoy: the node's, else the hub's.
+func reverseDecoyChoice(cfg *config.AppConfig, node *config.ForeignNode) string {
+	if node.ReverseDecoyStyle == "directadmin" || (node.ReverseDecoyStyle == "" && cfg.DecoyStyle == "directadmin") {
+		return "directadmin"
+	}
+	return "apache"
+}
+
 // runReverseIranMenu flips one hub node between normal and reverse mode.
 func runReverseIranMenu(cfg *config.AppConfig) {
 	if len(cfg.ForeignNodes) == 0 {
@@ -76,8 +84,9 @@ func runReverseIranMenu(cfg *config.AppConfig) {
 
 	color.HiCyan("\nReverse mode: %q will keep its token and settings, but the foreign dials this hub.", alias)
 	var overrides map[string]int
+	var opts reverseOpts
 	for {
-		plan, err := planReverse(cfg, node, overrides)
+		plan, err := planReverse(cfg, node, overrides, opts.SNI)
 		if err != nil {
 			color.Red("[x] %v", err)
 			return
@@ -89,6 +98,9 @@ func runReverseIranMenu(cfg *config.AppConfig) {
 				note = fmt.Sprintf("   (port %d is taken on this host)", old)
 			}
 			fmt.Printf("  %-10s %d%s\n", l.Type, l.Port, note)
+		}
+		if plan.SNI != "" {
+			fmt.Printf("  SNI        %s\n", plan.SNI)
 		}
 		var spec string
 		_ = survey.AskOne(&survey.Input{
@@ -106,7 +118,19 @@ func runReverseIranMenu(cfg *config.AppConfig) {
 		overrides = o
 	}
 
-	plan, tok, err := applyReverseIran(cfg, alias, overrides, "")
+	// Camouflage: mirror what the foreign wears (SNI it sends, decoy it shows).
+	_ = survey.AskOne(&survey.Input{
+		Message: "TLS SNI (the foreign's domain/SNI; Enter keeps the current one):",
+		Default: opts.SNI,
+	}, &opts.SNI)
+	opts.SNI = strings.TrimSpace(opts.SNI)
+	_ = survey.AskOne(&survey.Select{
+		Message: "Decoy shown to unauthorized probes (match the foreign's decoy-style):",
+		Options: []string{"apache", "directadmin"},
+		Default: reverseDecoyChoice(cfg, node),
+	}, &opts.Decoy)
+
+	plan, tok, err := applyReverseIran(cfg, alias, overrides, "", opts)
 	if err != nil {
 		color.Red("[x] %v", err)
 		return
