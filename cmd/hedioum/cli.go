@@ -33,6 +33,10 @@ func runSubcommand(name string, args []string) {
 		cmdFrontProxy(args)
 	case "pairing-token":
 		cmdPairingToken(args)
+	case "reverse-iran":
+		cmdReverseIran(args)
+	case "reverse-foreign":
+		cmdReverseForeign(args)
 	case "install":
 		cmdInstall(args)
 	case "uninstall":
@@ -90,6 +94,12 @@ Usage:
       --source-ips routes the hub by its address so the tunnel can share an SNI with a real service
   hedioum-tunnel pairing-token [--public-ip IP]
       (foreign) Print the paste-only pairing token for the hub, honoring --advertise-ports
+  hedioum-tunnel reverse-iran --alias NAME [--ports tls=443,...] [--public-ip IP] [--forward]
+      Flip an existing node to REVERSE mode (the foreign dials the hub instead of the hub
+      dialing the foreign) and print a reverse pairing token; --forward flips it back
+  hedioum-tunnel reverse-foreign --token REVERSE_TOKEN [--conns N] [--keep-listeners] [--forward]
+      Make this foreign dial out to the hub (paste the token from reverse-iran);
+      --forward restores the normal inbound mode
   hedioum-tunnel speedtest [--node NAME] [--mimic ssh|tls] [--seconds N] [--dir down|up|both]
   hedioum-tunnel probe     [--node NAME]    Test each endpoint (mimic) and report reachability
   hedioum-tunnel check-ip                   Report the egress IP's reputation (clean vs flagged)

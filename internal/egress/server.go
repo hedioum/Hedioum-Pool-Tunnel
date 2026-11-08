@@ -50,6 +50,15 @@ func StartForeignDaemon(cfg *config.AppConfig) {
 	}
 	slog.Info("egress starting", "egress_mode", egressMode, "mimics", len(cfg.Mimics), "decoy_style", cfg.DecoyStyle, "domain", cfg.Domain)
 
+	// Reverse tunnel: dial out to the Iran hub (see reverse.go). In reverse-only mode
+	// no inbound listener is opened.
+	StartReverseDialOut(cfg)
+	if cfg.ReverseOnly {
+		slog.Info("egress running in reverse-only mode (no inbound listeners)")
+		sysutil.WaitForTerminationSignal()
+		return
+	}
+
 	// One certificate manager for the whole daemon: a real Let's Encrypt cert (ACME)
 	// when a domain is configured and points here, otherwise self-signed. Shared by
 	// all TLS-family listeners so there is a single ACME account/cache.

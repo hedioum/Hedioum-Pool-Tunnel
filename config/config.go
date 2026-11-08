@@ -62,6 +62,20 @@ type AppConfig struct {
 	// to the listener). Used for the pairing token and the hub commands.
 	AdvertisePorts map[string]int `json:"advertise_ports,omitempty"`
 
+	// Reverse tunnel (foreign side). When ReverseTargets is set, this foreign node
+	// DIALS OUT to the Iran hub instead of waiting for the hub to dial in: it keeps
+	// ReverseConns authenticated pipes open to the hub's reverse listeners and serves
+	// the hub's streams over them. Useful when the hub->foreign direction is filtered
+	// (the foreign IP is "grey" for outbound handshakes from Iran) but foreign->Iran
+	// works. The hub still opens every logical stream, so egress behaviour is unchanged.
+	ReverseTargets []Endpoint `json:"reverse_targets,omitempty"`
+	// ReverseConns is how many pipes the foreign keeps open to the hub (default 12:
+	// 10 TCP + the 2 the hub dedicates to its UDP sub-pool).
+	ReverseConns int `json:"reverse_conns,omitempty"`
+	// ReverseOnly skips the foreign's inbound camouflage listeners entirely: no port
+	// is exposed, the node only dials out.
+	ReverseOnly bool `json:"reverse_only,omitempty"`
+
 	// Iran Node specific properties
 	ForeignNodes []ForeignNode `json:"foreign_nodes,omitempty"`
 }
@@ -128,6 +142,14 @@ type ForeignNode struct {
 	BandwidthLimitMbps  int        `json:"bandwidth_limit_mbps"`  // Target speed (Mbps) per physical connection before scale-up
 	BandwidthJitterMbps int        `json:"bandwidth_jitter_mbps"` // Variance to evade DPI patterns (Chaos Mesh)
 	AuthToken           string     `json:"auth_token"`
+
+	// Reverse marks a node whose pipes are dialed BY the foreign (see
+	// AppConfig.ReverseTargets) instead of by this hub. The hub then runs one
+	// camouflage listener per ReverseListeners entry, authenticates the foreign with
+	// AuthToken, and adopts each accepted connection into this node's pool. Such a
+	// node has no Endpoints to dial.
+	Reverse          bool            `json:"reverse,omitempty"`
+	ReverseListeners []MimicListener `json:"reverse_listeners,omitempty"`
 }
 
 // getConfigPath determines the storage destination for the configuration.
@@ -185,7 +207,7 @@ func parseConfig(data []byte) (*AppConfig, error) {
 	}
 	// Synthesize a single SSH listener from the legacy fields if none configured,
 	// so v0.6 foreign configs keep working unchanged.
-	if cfg.Role == "foreign" && len(cfg.Mimics) == 0 {
+	if cfg.Role == "foreign" && len(cfg.Mimics) == 0 && !cfg.ReverseOnly {
 		port := cfg.ForeignListenPort
 		if port == 0 {
 			port = 22
@@ -197,15 +219,19 @@ func parseConfig(data []byte) (*AppConfig, error) {
 		}}
 	}
 
+	if cfg.Role == "foreign" && len(cfg.ReverseTargets) > 0 && cfg.ReverseConns == 0 {
+		cfg.ReverseConns = 12 // 10 TCP + 2 UDP, matching the hub's default sub-pool sizes
+	}
+
 	for i := range cfg.ForeignNodes {
-		if cfg.ForeignNodes[i].TargetPort == 0 {
+		if cfg.ForeignNodes[i].TargetPort == 0 && !cfg.ForeignNodes[i].Reverse {
 			cfg.ForeignNodes[i].TargetPort = 22 // Default fallback for old configs
 		}
 		if cfg.ForeignNodes[i].SocksBind == "" {
 			cfg.ForeignNodes[i].SocksBind = "127.0.0.1" // default: private to the host
 		}
 		// Synthesize a single SSH endpoint from the legacy target if none set.
-		if len(cfg.ForeignNodes[i].Endpoints) == 0 {
+		if len(cfg.ForeignNodes[i].Endpoints) == 0 && !cfg.ForeignNodes[i].Reverse {
 			cfg.ForeignNodes[i].Endpoints = []Endpoint{{
 				Target: net.JoinHostPort(cfg.ForeignNodes[i].TargetIP, strconv.Itoa(cfg.ForeignNodes[i].TargetPort)),
 				Mimic:  "ssh",
