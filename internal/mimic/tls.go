@@ -22,8 +22,13 @@ import (
 // cert) never breaks authentication. Unauthenticated peers (browsers/probes) are
 // served a plausible response, so the port looks like an ordinary web host / panel.
 type TLSMimic struct {
-	Token  string
-	Filter *securestream.ReplayFilter
+	Token string
+	// ExtraTokens are further tokens this listener accepts (the hub's shared reverse
+	// listener, where one SNI serves several foreign nodes). The index of the token
+	// that authenticated a connection (0 = Token, i = ExtraTokens[i-1]) is available
+	// from MatchedToken on the connection Accept returns.
+	ExtraTokens []string
+	Filter      *securestream.ReplayFilter
 	// GetCertificate selects the server certificate for each ClientHello (required).
 	GetCertificate func(*tls.ClientHelloInfo) (*tls.Certificate, error)
 	// NextProtos is the ALPN list to advertise (nil -> h2,http/1.1). When ACME is
@@ -68,11 +73,21 @@ func (m *TLSMimic) Accept(conn net.Conn) (net.Conn, net.Conn, error) {
 		// as unauthenticated and route to the decoy.
 		return nil, buildReplayConn(tlsConn, rec), securestream.ErrAuth
 	}
-	if err := serverVerifyTLS(tlsConn, rec, m.Token, servedFP, m.Filter); err != nil {
+	matched, err := serverVerifyTLSAny(tlsConn, rec, m.tokens(), servedFP, m.Filter)
+	if err != nil {
 		return nil, buildReplayConn(tlsConn, rec), err // ErrAuth -> decoy
 	}
+	rec.matched = matched
 	rec.Stop()
 	return rec, nil, nil // yamux runs directly over the TLS conn (single crypto layer)
+}
+
+// tokens is every token this listener accepts, Token first.
+func (m *TLSMimic) tokens() []string {
+	if len(m.ExtraTokens) == 0 {
+		return []string{m.Token}
+	}
+	return append([]string{m.Token}, m.ExtraTokens...)
 }
 
 func (m *TLSMimic) nextProtos() []string {

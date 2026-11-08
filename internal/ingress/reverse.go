@@ -74,25 +74,73 @@ func startReverseListeners(cfg *config.AppConfig, hubManager *pool.HubManager) {
 		return cm, err
 	}
 
+	groups, problems := reverseGroups(cfg)
+	for _, p := range problems {
+		slog.Error("reverse listener skipped", "reason", p)
+	}
+	for _, g := range groups {
+		lead := g.Nodes[0]
+		certMgr, err := certFor(g.Listener.ServerName)
+		if err != nil {
+			slog.Error("failed to initialize certificate for reverse listener", "node", lead.Alias, "sni", g.Listener.ServerName, "err", err)
+			continue
+		}
+		tokens := make([]string, len(g.Nodes))
+		for i, n := range g.Nodes {
+			tokens[i] = n.AuthToken
+		}
+		style := reverseDecoyStyle(cfg, lead)
+		m, err := egress.BuildSharedServerMimic(tokens, style, g.Listener, filter, certMgr)
+		if err != nil {
+			slog.Error("failed to build reverse mimic", "node", lead.Alias, "type", g.Listener.Type, "err", err)
+			continue
+		}
+		go serveReverseGroup(g, m, hubManager)
+	}
+}
+
+// reverseGroup is one reverse listener socket and the node(s) it serves. Without
+// shared_reverse_auth every group has exactly one node.
+type reverseGroup struct {
+	Bind          string
+	ProxyProtocol bool
+	Listener      config.MimicListener
+	Nodes         []config.ForeignNode
+}
+
+// reverseGroups works out the listener sockets for every reverse node. A node's
+// listener joins an existing group only when shared_reverse_auth is on and the bind
+// address, port, mimic type, SNI and PROXY protocol setting all match; anything that
+// would collide otherwise is reported in problems and skipped, so one bad node can
+// never take another node's port.
+func reverseGroups(cfg *config.AppConfig) (groups []reverseGroup, problems []string) {
+	index := map[string]int{}
 	for _, node := range cfg.ForeignNodes {
 		if !node.Reverse {
 			continue
 		}
-		style := reverseDecoyStyle(cfg, node)
 		for _, ml := range node.ReverseListeners {
-			certMgr, err := certFor(ml.ServerName)
-			if err != nil {
-				slog.Error("failed to initialize certificate for reverse listener", "node", node.Alias, "sni", ml.ServerName, "err", err)
+			key := reverseListenAddr(node, ml.Port)
+			i, taken := index[key]
+			if !taken {
+				index[key] = len(groups)
+				groups = append(groups, reverseGroup{Bind: node.ReverseBind, ProxyProtocol: node.ReverseProxyProtocol, Listener: ml, Nodes: []config.ForeignNode{node}})
 				continue
 			}
-			m, err := egress.BuildServerMimic(node.AuthToken, style, ml, filter, certMgr)
-			if err != nil {
-				slog.Error("failed to build reverse mimic", "node", node.Alias, "type", ml.Type, "err", err)
-				continue
+			g := &groups[i]
+			switch {
+			case !cfg.SharedReverseAuth:
+				problems = append(problems, fmt.Sprintf("node %q wants %s, which node %q already uses (enable shared_reverse_auth to share a listener)", node.Alias, key, g.Nodes[0].Alias))
+			case g.Listener.Type != ml.Type || g.Listener.ServerName != ml.ServerName:
+				problems = append(problems, fmt.Sprintf("node %q shares %s with %q but its mimic type or SNI differs", node.Alias, key, g.Nodes[0].Alias))
+			case g.ProxyProtocol != node.ReverseProxyProtocol:
+				problems = append(problems, fmt.Sprintf("node %q shares %s with %q but its PROXY protocol setting differs", node.Alias, key, g.Nodes[0].Alias))
+			default:
+				g.Nodes = append(g.Nodes, node)
 			}
-			go serveReverseListener(node, ml, m, hubManager)
 		}
 	}
+	return groups, problems
 }
 
 // reverseDecoyStyle is the decoy persona a node's reverse listeners wear: the node's
@@ -116,15 +164,26 @@ func reverseListenAddr(node config.ForeignNode, port int) string {
 	return net.JoinHostPort(node.ReverseBind, fmt.Sprint(port))
 }
 
-// serveReverseListener binds one port and adopts every authenticated foreign pipe.
+// serveReverseListener serves a single node's listener (the unshared case).
 func serveReverseListener(node config.ForeignNode, ml config.MimicListener, m mimic.ServerMimic, hubManager *pool.HubManager) {
-	listenAddr := reverseListenAddr(node, ml.Port)
+	serveReverseGroup(reverseGroup{Bind: node.ReverseBind, ProxyProtocol: node.ReverseProxyProtocol, Listener: ml, Nodes: []config.ForeignNode{node}}, m, hubManager)
+}
+
+// serveReverseGroup binds one port and adopts every authenticated foreign pipe into
+// the pool of the node whose token authenticated it.
+func serveReverseGroup(g reverseGroup, m mimic.ServerMimic, hubManager *pool.HubManager) {
+	ml := g.Listener
+	aliases := make([]string, len(g.Nodes))
+	for i, n := range g.Nodes {
+		aliases[i] = n.Alias
+	}
+	listenAddr := net.JoinHostPort(g.Bind, fmt.Sprint(ml.Port))
 	listener, err := net.Listen("tcp", listenAddr)
 	if err != nil {
-		slog.Error("failed to bind reverse listener", "node", node.Alias, "type", ml.Type, "addr", listenAddr, "err", err)
+		slog.Error("failed to bind reverse listener", "nodes", aliases, "type", ml.Type, "addr", listenAddr, "err", err)
 		return
 	}
-	slog.Info("reverse listener active", "node", node.Alias, "type", ml.Type, "addr", listenAddr, "proxy_protocol", node.ReverseProxyProtocol)
+	slog.Info("reverse listener active", "nodes", aliases, "type", ml.Type, "addr", listenAddr, "proxy_protocol", g.ProxyProtocol, "shared", len(aliases) > 1)
 
 	for {
 		conn, err := listener.Accept()
@@ -132,18 +191,18 @@ func serveReverseListener(node config.ForeignNode, ml config.MimicListener, m mi
 			continue
 		}
 		go func(conn net.Conn) {
-			if node.ReverseProxyProtocol {
+			if g.ProxyProtocol {
 				// Behind a front proxy: take the real client address from its PROXY
 				// header. A connection that did not come through the proxy is dropped.
 				c, err := proxyproto.Accept(conn, proxyHeaderTimeout)
 				if err != nil {
-					slog.Debug("reverse listener dropped a connection without a PROXY header", "node", node.Alias, "err", err)
+					slog.Debug("reverse listener dropped a connection without a PROXY header", "nodes", aliases, "err", err)
 					conn.Close()
 					return
 				}
 				conn = c
 			}
-			handleReverseConn(conn, node.Alias, ml.Type, m, hubManager)
+			handleReverseConnMulti(conn, aliases, ml.Type, m, hubManager)
 		}(conn)
 	}
 }
@@ -151,6 +210,13 @@ func serveReverseListener(node config.ForeignNode, ml config.MimicListener, m mi
 // handleReverseConn runs the server-side mimic handshake on a connection the foreign
 // dialed, then hands the resulting yamux session to the node's pool.
 func handleReverseConn(conn net.Conn, alias, mimicType string, m mimic.ServerMimic, hubManager *pool.HubManager) {
+	handleReverseConnMulti(conn, []string{alias}, mimicType, m, hubManager)
+}
+
+// handleReverseConnMulti is handleReverseConn for a listener that serves several
+// nodes: the token that authenticated the handshake picks the node (aliases is in the
+// same order as the mimic's tokens).
+func handleReverseConnMulti(conn net.Conn, aliases []string, mimicType string, m mimic.ServerMimic, hubManager *pool.HubManager) {
 	secureConn, replayConn, err := m.Accept(conn)
 	if err != nil {
 		// Wrong credential, replayed handshake or a plain probe: serve the decoy so the
@@ -158,6 +224,12 @@ func handleReverseConn(conn net.Conn, alias, mimicType string, m mimic.ServerMim
 		go m.ProxyDecoy(replayConn)
 		return
 	}
+	idx := mimic.MatchedToken(secureConn)
+	if idx < 0 || idx >= len(aliases) {
+		secureConn.Close()
+		return
+	}
+	alias := aliases[idx]
 
 	// The hub opens every stream, so it is the yamux client even though it accepted
 	// the TCP connection; the foreign runs the yamux server side.

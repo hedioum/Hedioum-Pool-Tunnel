@@ -29,6 +29,34 @@ type RecorderConn struct {
 	net.Conn
 	ReadBuf   bytes.Buffer
 	recording bool
+	matched   int // index of the token that authenticated the peer (TLS mimic)
+}
+
+// MatchedToken reports which of a shared listener's tokens authenticated c (0 = the
+// mimic's own Token, i = ExtraTokens[i-1]). It is 0 for any connection that did not
+// come from a multi-token handshake.
+func MatchedToken(c net.Conn) int {
+	if r, ok := c.(*RecorderConn); ok {
+		return r.matched
+	}
+	return 0
+}
+
+// SetExtraTokens makes a TLS-family server mimic accept further tokens besides its
+// own (see TLSMimic.ExtraTokens). It reports false for a mimic that cannot (SSH).
+func SetExtraTokens(m ServerMimic, tokens []string) bool {
+	switch v := m.(type) {
+	case *TLSMimic:
+		v.ExtraTokens = tokens
+		return true
+	case *StartTLSMimic:
+		if v.TLS == nil {
+			return false
+		}
+		v.TLS.ExtraTokens = tokens
+		return true
+	}
+	return false
 }
 
 func (r *RecorderConn) Read(p []byte) (int, error) {

@@ -54,8 +54,14 @@ func runReverseIranMenu(cfg *config.AppConfig) {
 		labels = append(labels, l)
 		byLabel[l] = n.Alias
 	}
+	const advancedLabel = "Advanced: shared listener (one SNI for several foreign servers)"
+	labels = append(labels, advancedLabel)
 	var picked string
 	if err := survey.AskOne(&survey.Select{Message: "Which node to switch?", Options: labels}, &picked); err != nil {
+		return
+	}
+	if picked == advancedLabel {
+		runSharedAuthMenu(cfg)
 		return
 	}
 	alias := byLabel[picked]
@@ -96,6 +102,18 @@ func runReverseIranMenu(cfg *config.AppConfig) {
 	color.HiCyan("\nReverse mode: %q will keep its token and settings, but the foreign dials this hub.", alias)
 	var overrides map[string]int
 	var opts reverseOpts
+	if joinShared(cfg, node, &opts) {
+		plan, tok, err := applyReverseIran(cfg, alias, nil, "", opts)
+		if err != nil {
+			color.Red("[x] %v", err)
+			return
+		}
+		printReversePlan(alias, plan)
+		commitReverse(cfg)
+		color.HiGreen("\n━━━ Run this on the foreign server now ━━━")
+		fmt.Printf("hedioum-tunnel reverse-foreign --token %s\n", tok)
+		return
+	}
 	for {
 		plan, err := planReverse(cfg, node, overrides, opts.SNI)
 		if err != nil {
@@ -157,6 +175,73 @@ func runReverseIranMenu(cfg *config.AppConfig) {
 	color.HiGreen("\n━━━ Run this on the foreign server now ━━━")
 	fmt.Printf("hedioum-tunnel reverse-foreign --token %s\n", tok)
 	color.Yellow("(or choose \"Reverse Mode\" in the foreign's menu and paste the token)")
+}
+
+// reverseNodesOtherThan lists the reverse nodes a node could share a listener with.
+func reverseNodesOtherThan(cfg *config.AppConfig, alias string) []string {
+	var out []string
+	for _, n := range cfg.ForeignNodes {
+		if n.Reverse && n.Alias != alias && len(n.ReverseListeners) > 0 {
+			out = append(out, n.Alias)
+		}
+	}
+	return out
+}
+
+// joinShared offers to put the node on another reverse node's listener. It only asks
+// when the advanced setting is on and there is a node to join; it reports whether the
+// operator chose to share (opts.ShareWith is then set).
+func joinShared(cfg *config.AppConfig, node *config.ForeignNode, opts *reverseOpts) bool {
+	if !cfg.SharedReverseAuth {
+		return false
+	}
+	others := reverseNodesOtherThan(cfg, node.Alias)
+	if len(others) == 0 {
+		return false
+	}
+	var share bool
+	_ = survey.AskOne(&survey.Confirm{
+		Message: "Put this node on the same listener / SNI as another reverse node (advanced)?",
+		Default: false,
+	}, &share)
+	if !share {
+		return false
+	}
+	var with string
+	if err := survey.AskOne(&survey.Select{Message: "Share the listener of which node?", Options: others}, &with); err != nil {
+		return false
+	}
+	opts.ShareWith = with
+	return true
+}
+
+// runSharedAuthMenu turns the advanced shared-listener setting on or off.
+func runSharedAuthMenu(cfg *config.AppConfig) {
+	state := "OFF"
+	if cfg.SharedReverseAuth {
+		state = "ON"
+	}
+	color.HiCyan("\nShared reverse listeners are %s.", state)
+	color.White("When on, several foreign servers can dial the same port and SNI (for example one SNI")
+	color.White("behind nginx); the hub tells them apart by their node token. Leave it off unless you")
+	color.White("need that: with it off every node has its own port.")
+	for _, g := range sharedGroups(cfg) {
+		color.White("  shared: %s", g)
+	}
+	want := !cfg.SharedReverseAuth
+	var ok bool
+	_ = survey.AskOne(&survey.Confirm{Message: fmt.Sprintf("Turn it %s?", map[bool]string{true: "ON", false: "OFF"}[want])}, &ok)
+	if !ok {
+		return
+	}
+	if err := setSharedReverseAuth(cfg, want); err != nil {
+		color.Red("[x] %v", err)
+		return
+	}
+	commitReverse(cfg)
+	if want {
+		color.Yellow("    Now pick a node and choose to share another node's listener.")
+	}
 }
 
 // runReverseForeignMenu switches the foreign to dial the hub, or back.

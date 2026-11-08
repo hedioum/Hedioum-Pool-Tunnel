@@ -268,6 +268,10 @@ type reverseOpts struct {
 	// the node's. ProxyProtocol requires a PROXY header from the front proxy; nil keeps.
 	Bind          *string
 	ProxyProtocol *bool
+	// ShareWith joins another reverse node's listener (same port, type, SNI, bind and
+	// front-proxy settings), so one SNI carries several foreign servers. It needs the
+	// advanced shared_reverse_auth setting; the hub then tells the nodes apart by token.
+	ShareWith string
 }
 
 func validDecoyStyle(s string) error {
@@ -287,17 +291,37 @@ func applyReverseIran(cfg *config.AppConfig, alias string, overrides map[string]
 	if err := validDecoyStyle(opts.Decoy); err != nil {
 		return reversePlan{}, "", err
 	}
-	plan, err := planReverse(cfg, node, overrides, opts.SNI)
-	if err != nil {
-		return reversePlan{}, "", err
+	var plan reversePlan
+	adv := node.ReverseAdvertise
+	if opts.ShareWith != "" {
+		src, err := shareSource(cfg, node, opts)
+		if err != nil {
+			return reversePlan{}, "", err
+		}
+		plan = reversePlan{Endpoints: map[string]int{}, Moved: map[string]int{}}
+		for _, l := range src.ReverseListeners {
+			plan.Listeners = append(plan.Listeners, l)
+			plan.Endpoints[l.Type] = l.Port
+			plan.SNI = l.ServerName
+		}
+		adv = src.ReverseAdvertise
+		// The sharing node must run on the same socket settings as the one it joins.
+		bind, proxy := src.ReverseBind, src.ReverseProxyProtocol
+		opts.Bind, opts.ProxyProtocol = &bind, &proxy
+		plan.Warnings = append(plan.Warnings, fmt.Sprintf("this node shares the listener of %q: the hub tells the two foreign servers apart by token", src.Alias))
+	} else {
+		var err error
+		plan, err = planReverse(cfg, node, overrides, opts.SNI)
+		if err != nil {
+			return reversePlan{}, "", err
+		}
+		if opts.AdvertiseSet {
+			adv = opts.Advertise
+		}
 	}
 	ip, err := resolveHubIP(publicIP)
 	if err != nil {
 		return reversePlan{}, "", err
-	}
-	adv := node.ReverseAdvertise
-	if opts.AdvertiseSet {
-		adv = opts.Advertise
 	}
 	if opts.Bind != nil {
 		if err := validBind(*opts.Bind); err != nil {
@@ -371,6 +395,108 @@ func applyReverseIran(cfg *config.AppConfig, alias string, overrides map[string]
 	}
 	tok := pairing.Encode(pairing.Token{ExitIP: ip, AuthKey: node.AuthToken, SNI: plan.SNI, Endpoints: advertised, Reverse: true})
 	return plan, tok, nil
+}
+
+// shareSource validates --share-with and returns the node whose listener is joined.
+func shareSource(cfg *config.AppConfig, node *config.ForeignNode, opts reverseOpts) (*config.ForeignNode, error) {
+	if !cfg.SharedReverseAuth {
+		return nil, fmt.Errorf("sharing a listener is an advanced setting that is off; turn it on first: hedioum-tunnel reverse-shared-auth --on")
+	}
+	src := findNode(cfg, opts.ShareWith)
+	switch {
+	case src == nil:
+		return nil, fmt.Errorf("--share-with: no node with alias %q", opts.ShareWith)
+	case src.Alias == node.Alias:
+		return nil, fmt.Errorf("--share-with: a node cannot share its own listener")
+	case !src.Reverse || len(src.ReverseListeners) == 0:
+		return nil, fmt.Errorf("--share-with: node %q is not in reverse mode", src.Alias)
+	case opts.SNI != "" && opts.SNI != src.ReverseListeners[0].ServerName:
+		return nil, fmt.Errorf("--share-with: the SNI is %q on %q; a shared listener has one SNI", src.ReverseListeners[0].ServerName, src.Alias)
+	}
+	for _, l := range src.ReverseListeners {
+		if l.Type == "ssh" {
+			return nil, fmt.Errorf("--share-with: the ssh mimic cannot share a listener")
+		}
+	}
+	return src, nil
+}
+
+// sharedGroups lists the reverse nodes that currently share a listener, as
+// "listener: alias, alias" lines (empty when none do).
+func sharedGroups(cfg *config.AppConfig) []string {
+	byAddr := map[string][]string{}
+	var order []string
+	for _, n := range cfg.ForeignNodes {
+		if !n.Reverse {
+			continue
+		}
+		for _, l := range n.ReverseListeners {
+			key := fmt.Sprintf("%s:%d", n.ReverseBind, l.Port)
+			if _, ok := byAddr[key]; !ok {
+				order = append(order, key)
+			}
+			byAddr[key] = append(byAddr[key], n.Alias)
+		}
+	}
+	var out []string
+	for _, k := range order {
+		if len(byAddr[k]) > 1 {
+			out = append(out, fmt.Sprintf("%s: %s", k, strings.Join(byAddr[k], ", ")))
+		}
+	}
+	return out
+}
+
+// setSharedReverseAuth turns the advanced shared-listener setting on or off. It can
+// only be turned off once no two nodes use the same listener any more.
+func setSharedReverseAuth(cfg *config.AppConfig, on bool) error {
+	if !on {
+		if groups := sharedGroups(cfg); len(groups) > 0 {
+			return fmt.Errorf("these listeners are shared and would stop working; give each node its own port first (reverse-iran --alias NAME --ports ...): %s", strings.Join(groups, "; "))
+		}
+	}
+	cfg.SharedReverseAuth = on
+	return nil
+}
+
+// cmdReverseSharedAuth shows or changes the advanced shared-listener setting.
+func cmdReverseSharedAuth(args []string) {
+	fs := flag.NewFlagSet("reverse-shared-auth", flag.ExitOnError)
+	on := fs.Bool("on", false, "allow several reverse nodes to share one listener (one SNI, nodes told apart by token)")
+	off := fs.Bool("off", false, "back to one listener per node (default)")
+	_ = fs.Parse(args)
+	cfg, err := config.LoadConfig()
+	if err != nil || cfg.Role != "iran" {
+		fail("no Iran hub config (run this on the hub)")
+	}
+	if *on && *off {
+		fail("pass either --on or --off")
+	}
+	if !*on && !*off {
+		state := "off"
+		if cfg.SharedReverseAuth {
+			state = "on"
+		}
+		fmt.Printf("Shared reverse listeners: %s\n", state)
+		for _, g := range sharedGroups(cfg) {
+			fmt.Printf("  shared: %s\n", g)
+		}
+		return
+	}
+	if err := setSharedReverseAuth(cfg, *on); err != nil {
+		fail("%v", err)
+	}
+	if err := config.SaveConfig(cfg); err != nil {
+		fail("failed to save config: %v", err)
+	}
+	if *on {
+		color.Green("[✓] Shared reverse listeners are on.")
+		color.Yellow("    Join a node to another's listener with: hedioum-tunnel reverse-iran --alias NEW --share-with EXISTING")
+	} else {
+		color.Green("[✓] Shared reverse listeners are off (one listener per node).")
+	}
+	reconcileUnit("iran")
+	restartDaemon()
 }
 
 // applyForwardIran flips a reverse node back to the normal mode in cfg.
@@ -482,6 +608,7 @@ func cmdReverseIran(args []string) {
 	advertise := fs.String("advertise-ports", "", "ports the foreign dials, as TYPE=PORT,... when a front proxy (nginx stream) forwards them to the listener ports (remembered; \"\" clears)")
 	bind := fs.String("bind", "", "address the listeners bind to (127.0.0.1 behind a front proxy; \"\" = all interfaces; remembered)")
 	proxyProto := fs.Bool("proxy-protocol", false, "require a PROXY protocol header from the front proxy (nginx proxy_protocol on / HAProxy send-proxy; remembered)")
+	shareWith := fs.String("share-with", "", "advanced: join this reverse node's listener (same port/SNI) instead of getting its own; needs `reverse-shared-auth --on`")
 	decoy := fs.String("decoy-style", "", "decoy shown to unauthorized probes: apache|directadmin (default: the node's, else the hub's)")
 	forward := fs.Bool("forward", false, "flip the node back to the normal mode (the hub dials the foreign)")
 	_ = fs.Parse(args)
@@ -516,7 +643,7 @@ func cmdReverseIran(args []string) {
 	if err != nil {
 		fail("--advertise-ports: %v", err)
 	}
-	opts := reverseOpts{SNI: *sni, Decoy: *decoy, Advertise: adv}
+	opts := reverseOpts{SNI: *sni, Decoy: *decoy, Advertise: adv, ShareWith: *shareWith}
 	fs.Visit(func(f *flag.Flag) { // only flags that were actually given change the node
 		switch f.Name {
 		case "advertise-ports":

@@ -31,6 +31,8 @@ func runSubcommand(name string, args []string) {
 		cmdEditForeign(args)
 	case "reverse-iran":
 		cmdReverseIran(args)
+	case "reverse-shared-auth":
+		cmdReverseSharedAuth(args)
 	case "front-proxy":
 		cmdFrontProxy(args)
 	case "pairing-token":
@@ -92,6 +94,9 @@ Usage:
       dialing the foreign) and print a reverse pairing token; --forward flips it back
       Behind nginx/HAProxy on a shared port: --sni NAME --advertise-ports TYPE=443
       --bind 127.0.0.1 [--proxy-protocol]  (settings are remembered per node)
+  hedioum-tunnel reverse-shared-auth [--on|--off]
+      Advanced (hub, default off): let several reverse nodes share ONE listener / SNI; the
+      hub tells them apart by token. Join a node with reverse-iran --alias NEW --share-with OLD
   hedioum-tunnel front-proxy [--alias NAME] [--kind nginx|haproxy] [--public-port 443]
       Print the nginx/HAProxy config that routes the tunnel's SNI to its listener
       (on the hub: --alias of a reverse node; on a foreign: its own listener)

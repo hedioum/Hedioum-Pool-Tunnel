@@ -465,3 +465,72 @@ func TestForeignTokenAndSnippet(t *testing.T) {
 		t.Fatal("no SNI: no spec")
 	}
 }
+
+// Shared listeners are an advanced, off-by-default setting: --share-with is refused
+// until it is on, then the second node joins the first one's port/SNI/front proxy and
+// its token advertises the same public port.
+func TestShareWithNeedsTheAdvancedSetting(t *testing.T) {
+	fakePortsInUse(t)
+	a := planTestNode("a", config.Endpoint{Target: "1.2.3.4:8443", Mimic: "https-alt"})
+	b := planTestNode("b", config.Endpoint{Target: "5.6.7.8:8443", Mimic: "https-alt"})
+	b.AuthToken = "fedcba9876543210fedcba9876543210"
+	cfg := &config.AppConfig{Role: "iran", ForeignNodes: []config.ForeignNode{a, b}}
+
+	if _, _, err := applyReverseIran(cfg, "a", nil, "198.51.100.7", reverseOpts{
+		SNI: "t.example.com", AdvertiseSet: true, Advertise: map[string]int{"https-alt": 443},
+		Bind: sp("127.0.0.1"), ProxyProtocol: bp(true),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := applyReverseIran(cfg, "b", nil, "198.51.100.7", reverseOpts{ShareWith: "a"}); err == nil || !strings.Contains(err.Error(), "reverse-shared-auth") {
+		t.Fatalf("share-with must be refused while the setting is off, got %v", err)
+	}
+
+	if err := setSharedReverseAuth(cfg, true); err != nil {
+		t.Fatal(err)
+	}
+	plan, tok, err := applyReverseIran(cfg, "b", nil, "198.51.100.7", reverseOpts{ShareWith: "a"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	na, nb := cfg.ForeignNodes[0], cfg.ForeignNodes[1]
+	if !reflect.DeepEqual(na.ReverseListeners, nb.ReverseListeners) {
+		t.Fatalf("listeners differ: %+v vs %+v", na.ReverseListeners, nb.ReverseListeners)
+	}
+	if nb.ReverseBind != "127.0.0.1" || !nb.ReverseProxyProtocol || nb.ReverseAdvertise["https-alt"] != 443 {
+		t.Fatalf("front-proxy settings not copied: %+v", nb)
+	}
+	if plan.SNI != "t.example.com" || tok == "" {
+		t.Fatalf("plan %+v tok %q", plan, tok)
+	}
+	pt, _, err := pairing.Decode(tok)
+	if err != nil || pt.Endpoints["https-alt"] != 443 || pt.AuthKey != nb.AuthToken || !pt.Reverse {
+		t.Fatalf("token wrong: %+v err=%v", pt, err)
+	}
+
+	// The setting cannot be turned off while two nodes still share a listener.
+	if err := setSharedReverseAuth(cfg, false); err == nil || !strings.Contains(err.Error(), "a, b") {
+		t.Fatalf("turning off with a shared listener must fail, got %v", err)
+	}
+	if !cfg.SharedReverseAuth {
+		t.Fatal("a refused change must leave the setting on")
+	}
+}
+
+func TestShareWithRejectsBadSources(t *testing.T) {
+	fakePortsInUse(t)
+	a := planTestNode("a", config.Endpoint{Target: "1.2.3.4:8443", Mimic: "https-alt"})
+	b := planTestNode("b", config.Endpoint{Target: "5.6.7.8:8443", Mimic: "https-alt"})
+	cfg := &config.AppConfig{Role: "iran", SharedReverseAuth: true, ForeignNodes: []config.ForeignNode{a, b}}
+	for name, with := range map[string]string{"unknown": "zzz", "itself": "b", "not reverse": "a"} {
+		if _, _, err := applyReverseIran(cfg, "b", nil, "198.51.100.7", reverseOpts{ShareWith: with}); err == nil {
+			t.Errorf("%s: share-with %q must fail", name, with)
+		}
+	}
+	if _, _, err := applyReverseIran(cfg, "a", nil, "198.51.100.7", reverseOpts{SNI: "one.example.com"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := applyReverseIran(cfg, "b", nil, "198.51.100.7", reverseOpts{ShareWith: "a", SNI: "other.example.com"}); err == nil {
+		t.Error("a different SNI on a shared listener must fail")
+	}
+}
