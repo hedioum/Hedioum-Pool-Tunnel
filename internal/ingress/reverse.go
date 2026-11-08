@@ -7,12 +7,14 @@ import (
 	"log/slog"
 	"net"
 	"path/filepath"
+	"time"
 
 	"github.com/hashicorp/yamux"
 	"github.com/hedioum/Hedioum-Pool-Tunnel/config"
 	"github.com/hedioum/Hedioum-Pool-Tunnel/internal/egress"
 	"github.com/hedioum/Hedioum-Pool-Tunnel/internal/mimic"
 	"github.com/hedioum/Hedioum-Pool-Tunnel/internal/pool"
+	"github.com/hedioum/Hedioum-Pool-Tunnel/internal/proxyproto"
 	"github.com/hedioum/Hedioum-Pool-Tunnel/internal/securestream"
 	"github.com/hedioum/Hedioum-Pool-Tunnel/internal/tlscert"
 )
@@ -88,7 +90,7 @@ func startReverseListeners(cfg *config.AppConfig, hubManager *pool.HubManager) {
 				slog.Error("failed to build reverse mimic", "node", node.Alias, "type", ml.Type, "err", err)
 				continue
 			}
-			go serveReverseListener(node.Alias, ml, m, hubManager)
+			go serveReverseListener(node, ml, m, hubManager)
 		}
 	}
 }
@@ -105,22 +107,44 @@ func reverseDecoyStyle(cfg *config.AppConfig, node config.ForeignNode) string {
 	return "apache"
 }
 
+// proxyHeaderTimeout bounds how long a connection from the front proxy may take to
+// send its PROXY header.
+const proxyHeaderTimeout = 5 * time.Second
+
+// reverseListenAddr is where a node's reverse listener binds.
+func reverseListenAddr(node config.ForeignNode, port int) string {
+	return net.JoinHostPort(node.ReverseBind, fmt.Sprint(port))
+}
+
 // serveReverseListener binds one port and adopts every authenticated foreign pipe.
-func serveReverseListener(alias string, ml config.MimicListener, m mimic.ServerMimic, hubManager *pool.HubManager) {
-	listenAddr := fmt.Sprintf(":%d", ml.Port)
+func serveReverseListener(node config.ForeignNode, ml config.MimicListener, m mimic.ServerMimic, hubManager *pool.HubManager) {
+	listenAddr := reverseListenAddr(node, ml.Port)
 	listener, err := net.Listen("tcp", listenAddr)
 	if err != nil {
-		slog.Error("failed to bind reverse listener", "node", alias, "type", ml.Type, "addr", listenAddr, "err", err)
+		slog.Error("failed to bind reverse listener", "node", node.Alias, "type", ml.Type, "addr", listenAddr, "err", err)
 		return
 	}
-	slog.Info("reverse listener active", "node", alias, "type", ml.Type, "addr", listenAddr)
+	slog.Info("reverse listener active", "node", node.Alias, "type", ml.Type, "addr", listenAddr, "proxy_protocol", node.ReverseProxyProtocol)
 
 	for {
 		conn, err := listener.Accept()
 		if err != nil {
 			continue
 		}
-		go handleReverseConn(conn, alias, ml.Type, m, hubManager)
+		go func(conn net.Conn) {
+			if node.ReverseProxyProtocol {
+				// Behind a front proxy: take the real client address from its PROXY
+				// header. A connection that did not come through the proxy is dropped.
+				c, err := proxyproto.Accept(conn, proxyHeaderTimeout)
+				if err != nil {
+					slog.Debug("reverse listener dropped a connection without a PROXY header", "node", node.Alias, "err", err)
+					conn.Close()
+					return
+				}
+				conn = c
+			}
+			handleReverseConn(conn, node.Alias, ml.Type, m, hubManager)
+		}(conn)
 	}
 }
 

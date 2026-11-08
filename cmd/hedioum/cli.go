@@ -87,16 +87,19 @@ Usage:
   hedioum-tunnel edit-node --alias NAME [flags]  Edit a node in place (only the flags
       you pass change; token kept unless --token/--rotate-token)
   hedioum-tunnel remove-node --alias NAME
-  hedioum-tunnel front-proxy [--kind nginx|haproxy] [--public-port 443] [--source-ips HUB_IP]   (foreign)
-      Print the nginx/HAProxy config that routes the tunnel's SNI to this foreign's listener,
-      so the tunnel can share a port such as 443 with a panel or user configs. Pair it with
-      edit-foreign --advertise-ports TYPE=443 --bind 127.0.0.1 [--proxy-protocol].
-      --source-ips routes the hub by its address so the tunnel can share an SNI with a real service
+  hedioum-tunnel front-proxy [--alias NAME] [--kind nginx|haproxy] [--public-port 443] [--source-ips IP,IP]
+      Print the nginx/HAProxy config that routes the tunnel's SNI to its listener, so the tunnel
+      can share a port such as 443 with a panel or user configs: on a foreign, its own listener
+      (pair it with edit-foreign --advertise-ports TYPE=443 --bind 127.0.0.1 [--proxy-protocol]);
+      on the hub, the reverse node --alias NAME. --source-ips (or --by-source on the hub) routes
+      the tunnel peers by address so the tunnel can share an SNI with a real service
   hedioum-tunnel pairing-token [--public-ip IP]
       (foreign) Print the paste-only pairing token for the hub, honoring --advertise-ports
   hedioum-tunnel reverse-iran --alias NAME [--ports tls=443,...] [--all-mimics] [--public-ip IP] [--forward]
       Flip an existing node to REVERSE mode (the foreign dials the hub instead of the hub
       dialing the foreign) and print a reverse pairing token; --forward flips it back
+      Behind nginx/HAProxy on a shared port: --sni NAME --advertise-ports TYPE=443
+      --bind 127.0.0.1 [--proxy-protocol]  (settings are remembered per node)
   hedioum-tunnel reverse-foreign --token REVERSE_TOKEN [--conns N] [--keep-listeners] [--forward]
       Make this foreign dial out to the hub (paste the token from reverse-iran);
       --forward restores the normal inbound mode

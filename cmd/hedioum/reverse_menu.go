@@ -65,21 +65,32 @@ func runReverseIranMenu(cfg *config.AppConfig) {
 	}
 
 	if node.Reverse {
-		ok := true
-		_ = survey.AskOne(&survey.Confirm{
-			Message: fmt.Sprintf("Switch %q back to the normal mode (the hub dials the foreign)?", alias),
-			Default: true,
-		}, &ok)
-		if !ok {
+		var choice string
+		_ = survey.AskOne(&survey.Select{
+			Message: fmt.Sprintf("Node %q is in reverse mode. What now?", alias),
+			Options: []string{
+				"Reconfigure (ports, SNI, front proxy)",
+				"Show the nginx / HAProxy config for this node",
+				"Switch back to the normal mode",
+				"Cancel",
+			},
+		}, &choice)
+		switch {
+		case strings.HasPrefix(choice, "Show"):
+			showFrontProxyConfig(node)
+			return
+		case strings.HasPrefix(choice, "Switch back"):
+			if err := applyForwardIran(cfg, alias); err != nil {
+				color.Red("[x] %v", err)
+				return
+			}
+			commitReverse(cfg)
+			color.Yellow("    Also switch the foreign back: hedioum-tunnel reverse-foreign --forward")
+			return
+		case strings.HasPrefix(choice, "Reconfigure"):
+		default:
 			return
 		}
-		if err := applyForwardIran(cfg, alias); err != nil {
-			color.Red("[x] %v", err)
-			return
-		}
-		commitReverse(cfg)
-		color.Yellow("    Also switch the foreign back: hedioum-tunnel reverse-foreign --forward")
-		return
 	}
 
 	color.HiCyan("\nReverse mode: %q will keep its token and settings, but the foreign dials this hub.", alias)
@@ -130,6 +141,8 @@ func runReverseIranMenu(cfg *config.AppConfig) {
 		Default: reverseDecoyChoice(cfg, node),
 	}, &opts.Decoy)
 
+	askFrontProxy(cfg, node, overrides, &opts)
+
 	plan, tok, err := applyReverseIran(cfg, alias, overrides, "", opts)
 	if err != nil {
 		color.Red("[x] %v", err)
@@ -137,6 +150,10 @@ func runReverseIranMenu(cfg *config.AppConfig) {
 	}
 	printReversePlan(alias, plan)
 	commitReverse(cfg)
+	if len(node.ReverseAdvertise) > 0 {
+		color.HiCyan("\n━━━ Front proxy: add this to nginx / HAProxy first ━━━")
+		showFrontProxyConfig(findNode(cfg, alias))
+	}
 	color.HiGreen("\n━━━ Run this on the foreign server now ━━━")
 	fmt.Printf("hedioum-tunnel reverse-foreign --token %s\n", tok)
 	color.Yellow("(or choose \"Reverse Mode\" in the foreign's menu and paste the token)")
@@ -201,4 +218,81 @@ func runReverseForeignMenu(cfg *config.AppConfig) {
 	}
 	color.Green("[✓] Reverse mode on: dialing the hub across %d endpoint(s).", n)
 	commitReverse(cfg)
+}
+
+// askFrontProxy asks whether an nginx / HAProxy sits in front of the public port and
+// fills opts (advertised port, loopback bind, PROXY protocol) accordingly.
+func askFrontProxy(cfg *config.AppConfig, node *config.ForeignNode, overrides map[string]int, opts *reverseOpts) {
+	var how string
+	_ = survey.AskOne(&survey.Select{
+		Message: "How will the foreign reach this hub?",
+		Options: []string{
+			"Directly on the listener ports",
+			"Through a reverse proxy (nginx / HAProxy) on a shared port such as 443",
+		},
+	}, &how)
+	if !strings.HasPrefix(how, "Through") {
+		// Direct: clear any earlier front-proxy settings.
+		opts.AdvertiseSet = true
+		empty, pp := "", false
+		opts.Bind, opts.ProxyProtocol = &empty, &pp
+		return
+	}
+
+	plan, err := planReverse(cfg, node, overrides, opts.SNI)
+	if err != nil || len(plan.Listeners) == 0 {
+		color.Red("[x] cannot plan the listeners: %v", err)
+		return
+	}
+	ty := plan.Listeners[0].Type
+	if len(plan.Listeners) > 1 {
+		var types []string
+		for _, l := range plan.Listeners {
+			types = append(types, l.Type)
+		}
+		_ = survey.AskOne(&survey.Select{
+			Message: "A proxy routes one SNI to one listener. Which mimic type should the foreign use?",
+			Options: types,
+		}, &ty)
+	}
+	portStr := "443"
+	_ = survey.AskOne(&survey.Input{Message: "Public port the proxy listens on:", Default: "443"}, &portStr)
+	port, perr := strconv.Atoi(strings.TrimSpace(portStr))
+	if perr != nil || validPort(port) != nil {
+		color.Red("[x] invalid port; keeping direct access")
+		return
+	}
+	pp := false
+	_ = survey.AskOne(&survey.Confirm{
+		Message: "Does your proxy send the PROXY protocol? (nginx: `proxy_protocol on;` in the stream server)",
+		Default: false,
+	}, &pp)
+	local := true
+	_ = survey.AskOne(&survey.Confirm{
+		Message: "Bind the hub listener to 127.0.0.1 so it is only reachable through the proxy?",
+		Default: true,
+	}, &local)
+	bind := ""
+	if local {
+		bind = "127.0.0.1"
+	}
+	opts.Advertise = map[string]int{ty: port}
+	opts.AdvertiseSet = true
+	opts.Bind, opts.ProxyProtocol = &bind, &pp
+	if opts.SNI == "" && plan.SNI == "" {
+		color.Yellow("[!] A proxy routes by SNI: set one in the SNI prompt (a name that is not one of your sites).")
+	}
+}
+
+// showFrontProxyConfig prints the nginx and HAProxy snippets for a node.
+func showFrontProxyConfig(node *config.ForeignNode) {
+	for _, gen := range []func(config.ForeignNode, int) (string, error){nginxSnippet, haproxySnippet} {
+		out, err := gen(*node, 443)
+		if err != nil {
+			color.Red("[x] %v", err)
+			return
+		}
+		fmt.Println()
+		fmt.Println(out)
+	}
 }

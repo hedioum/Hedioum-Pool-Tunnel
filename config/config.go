@@ -154,6 +154,19 @@ type ForeignNode struct {
 	// listeners show to unauthorized probes, so the hub looks like the foreign it
 	// stands in for. Empty = the hub's own decoy_style.
 	ReverseDecoyStyle string `json:"reverse_decoy_style,omitempty"`
+	// ReverseBind is the address the reverse listeners bind to ("" = all interfaces).
+	// Use "127.0.0.1" when a front proxy (nginx stream, HAProxy) owns the public port
+	// and forwards the tunnel's SNI to the listener.
+	ReverseBind string `json:"reverse_bind,omitempty"`
+	// ReverseProxyProtocol makes the reverse listeners require a PROXY protocol header
+	// (v1 or v2) on every connection, as sent by a front proxy that has
+	// `proxy_protocol on` (nginx) / `send-proxy` (HAProxy). Connections without one
+	// are dropped, so it should only be used together with a loopback ReverseBind.
+	ReverseProxyProtocol bool `json:"reverse_proxy_protocol,omitempty"`
+	// ReverseAdvertise maps a mimic type to the public port the foreign is told to dial
+	// when it differs from the port the listener binds (a front proxy listens on 443 and
+	// forwards to the listener). It is remembered so re-printing the token keeps it.
+	ReverseAdvertise map[string]int `json:"reverse_advertise_ports,omitempty"`
 }
 
 // getConfigPath determines the storage destination for the configuration.

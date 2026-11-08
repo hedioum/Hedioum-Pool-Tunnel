@@ -89,17 +89,20 @@ func editIranNode(cfg *config.AppConfig, node config.ForeignNode) {
 	}
 
 	cfg.UpdateForeignNode(config.ForeignNode{
-		Alias:               node.Alias,
-		LocalSocksPort:      socks,
-		AuthToken:           tok,
-		Endpoints:           buildEndpoints(ip, types, portMap, sni),
-		MinConnections:      minC,
-		MaxConnections:      maxC,
-		BandwidthLimitMbps:  bw,
-		BandwidthJitterMbps: jit,
-		Reverse:             node.Reverse,
-		ReverseListeners:    node.ReverseListeners,
-		ReverseDecoyStyle:   node.ReverseDecoyStyle,
+		Alias:                node.Alias,
+		LocalSocksPort:       socks,
+		AuthToken:            tok,
+		Endpoints:            buildEndpoints(ip, types, portMap, sni),
+		MinConnections:       minC,
+		MaxConnections:       maxC,
+		BandwidthLimitMbps:   bw,
+		BandwidthJitterMbps:  jit,
+		Reverse:              node.Reverse,
+		ReverseListeners:     node.ReverseListeners,
+		ReverseDecoyStyle:    node.ReverseDecoyStyle,
+		ReverseBind:          node.ReverseBind,
+		ReverseProxyProtocol: node.ReverseProxyProtocol,
+		ReverseAdvertise:     node.ReverseAdvertise,
 	})
 	color.Green("[✓] Node %q updated (target %s, mimics: %s).", node.Alias, ip, strings.Join(types, ","))
 }

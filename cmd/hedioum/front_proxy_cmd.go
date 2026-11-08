@@ -10,19 +10,37 @@ import (
 	"github.com/hedioum/Hedioum-Pool-Tunnel/config"
 )
 
-// front-proxy prints the nginx / HAProxy configuration that routes the tunnel's SNI to
-// the foreign's listener, so the tunnel and other services (a panel, user configs...) can
+// front-proxy prints the nginx / HAProxy configuration that routes a reverse node's SNI
+// to its hub listener, so the tunnel and other services (a panel, user configs...) can
 // share one public port such as 443. It only prints: it never edits the proxy's files.
+
+// frontProxyUpstream returns the host:port a front proxy should forward the node's
+// tunnel traffic to, and the SNI it should match on.
+func frontProxyUpstream(node config.ForeignNode) (upstream, sni string, err error) {
+	if !node.Reverse || len(node.ReverseListeners) == 0 {
+		return "", "", fmt.Errorf("node %q is not in reverse mode; run reverse-iran first", node.Alias)
+	}
+	l := node.ReverseListeners[0]
+	host := node.ReverseBind
+	if host == "" || net.ParseIP(host).IsUnspecified() {
+		host = "127.0.0.1"
+	}
+	sni = l.ServerName
+	if sni == "" {
+		return "", "", fmt.Errorf("node %q has no SNI; re-run reverse-iran with --sni NAME so the proxy can recognise the tunnel", node.Alias)
+	}
+	return net.JoinHostPort(host, fmt.Sprint(l.Port)), sni, nil
+}
 
 // frontSpec is what a front proxy needs to know about the tunnel listener it fronts.
 type frontSpec struct {
 	Upstream      string // host:port of the tunnel listener the proxy forwards to
 	SNI           string // the SNI that identifies tunnel traffic
 	ProxyProtocol bool   // whether the listener requires a PROXY protocol header
-	// Sources, when set, routes by the connecting IP instead of the SNI: these addresses
-	// (the hub) always go to the tunnel listener, every other client keeps going where the
-	// SNI sends it. This lets the tunnel use the SAME SNI as a real service on that port,
-	// which SNI routing alone cannot do.
+	// Sources, when set, routes by the connecting IP instead of (nginx: before) the SNI:
+	// these addresses (the foreign servers, or the hub) always go to the tunnel listener,
+	// every other client keeps going where the SNI sends it. This lets the tunnel use the
+	// SAME SNI as a real service on that port, which SNI routing alone cannot do.
 	Sources []string
 }
 
@@ -132,6 +150,31 @@ func parseSourceIPs(spec string) ([]string, error) {
 	return out, nil
 }
 
+// nodeSourceIPs are the foreign IPs of a reverse node and of every node that shares its
+// listener: the addresses a hub-side proxy should send to the tunnel.
+func nodeSourceIPs(cfg *config.AppConfig, node config.ForeignNode) []string {
+	var out []string
+	seen := map[string]bool{}
+	add := func(n config.ForeignNode) {
+		if ip := net.ParseIP(n.TargetIP); ip != nil && !seen[ip.String()] {
+			seen[ip.String()] = true
+			out = append(out, ip.String())
+		}
+	}
+	add(node)
+	if len(node.ReverseListeners) > 0 {
+		for _, other := range cfg.ForeignNodes {
+			if other.Alias == node.Alias || !other.Reverse || len(other.ReverseListeners) == 0 {
+				continue
+			}
+			if other.ReverseBind == node.ReverseBind && other.ReverseListeners[0].Port == node.ReverseListeners[0].Port {
+				add(other)
+			}
+		}
+	}
+	return out
+}
+
 // haproxyFor renders the HAProxy configuration for a spec.
 func haproxyFor(sp frontSpec, publicPort int) string {
 	send := ""
@@ -159,12 +202,32 @@ func haproxyFor(sp frontSpec, publicPort int) string {
 	return b.String()
 }
 
-// cmdFrontProxy prints the front-proxy configuration for the foreign's own listener.
+// nginxSnippet / haproxySnippet render the config for a reverse hub node.
+func nginxSnippet(node config.ForeignNode, publicPort int) (string, error) {
+	up, sni, err := frontProxyUpstream(node)
+	if err != nil {
+		return "", err
+	}
+	return nginxFor(frontSpec{Upstream: up, SNI: sni, ProxyProtocol: node.ReverseProxyProtocol}, publicPort), nil
+}
+
+func haproxySnippet(node config.ForeignNode, publicPort int) (string, error) {
+	up, sni, err := frontProxyUpstream(node)
+	if err != nil {
+		return "", err
+	}
+	return haproxyFor(frontSpec{Upstream: up, SNI: sni, ProxyProtocol: node.ReverseProxyProtocol}, publicPort), nil
+}
+
+// cmdFrontProxy prints the front-proxy configuration: for a reverse node on the hub
+// (--alias NAME), or for the foreign's own listeners when run on a foreign.
 func cmdFrontProxy(args []string) {
 	fs := flag.NewFlagSet("front-proxy", flag.ExitOnError)
+	alias := fs.String("alias", "", "reverse node alias (on the Iran hub)")
 	kind := fs.String("kind", "nginx", "front proxy: nginx | haproxy")
 	port := fs.Int("public-port", 443, "the public port the front proxy listens on")
-	sources := fs.String("source-ips", "", "comma separated exact IPs of the Iran hub(s): route them to the tunnel by source address instead of the SNI, so the tunnel can share an SNI with a real service")
+	bySource := fs.Bool("by-source", false, "route the tunnel by the connecting IP instead of the SNI, so it can share an SNI with a real service (hub: the node's foreign IP is used; or pass --source-ips)")
+	sources := fs.String("source-ips", "", "comma separated exact IPs that always go to the tunnel (implies --by-source); on a foreign these are the hub IP(s)")
 	_ = fs.Parse(args)
 
 	if err := validPort(*port); err != nil {
@@ -174,21 +237,44 @@ func cmdFrontProxy(args []string) {
 		fail("--kind must be nginx or haproxy")
 	}
 	cfg, err := config.LoadConfig()
-	if err != nil || cfg.Role != "foreign" {
-		fail("no foreign config (run this on the foreign server)")
-	}
-	sp, err := foreignFrontSpec(cfg)
 	if err != nil {
-		fail("%v", err)
+		fail("no configuration found (run this on the hub or the foreign)")
 	}
 
-	if *sources != "" {
+	var sp frontSpec
+	switch cfg.Role {
+	case "foreign":
+		sp, err = foreignFrontSpec(cfg)
+		if err != nil {
+			fail("%v", err)
+		}
+	case "iran":
+		if *alias == "" {
+			fail("--alias is required on the hub (the reverse node to front)")
+		}
+		node := findNode(cfg, *alias)
+		if node == nil {
+			fail("no node with alias %q", *alias)
+		}
+		up, sni, ferr := frontProxyUpstream(*node)
+		if ferr != nil {
+			fail("%v", ferr)
+		}
+		sp = frontSpec{Upstream: up, SNI: sni, ProxyProtocol: node.ReverseProxyProtocol}
+	default:
+		fail("unknown role %q", cfg.Role)
+	}
+
+	if *bySource || *sources != "" {
 		ips, perr := parseSourceIPs(*sources)
 		if perr != nil {
 			fail("--source-ips: %v", perr)
 		}
+		if len(ips) == 0 && cfg.Role == "iran" {
+			ips = nodeSourceIPs(cfg, *findNode(cfg, *alias))
+		}
 		if len(ips) == 0 {
-			fail("--source-ips: no addresses given")
+			fail("--by-source needs the connecting IPs: pass --source-ips IP,IP (the foreign servers on a hub, the hub on a foreign)")
 		}
 		sp.Sources = ips
 	}
@@ -199,5 +285,7 @@ func cmdFrontProxy(args []string) {
 	} else {
 		fmt.Println(nginxFor(sp, *port))
 	}
-	printHubHintForForeign(cfg, sp, *port)
+	if cfg.Role == "foreign" {
+		printHubHintForForeign(cfg, sp, *port)
+	}
 }
