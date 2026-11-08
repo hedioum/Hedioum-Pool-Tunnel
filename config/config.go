@@ -112,6 +112,19 @@ type ReverseHub struct {
 // 2 the hub dedicates to its UDP sub-pool.
 const DefaultReverseConns = 12
 
+// SuggestedReverseMax is the upper bound the menus propose for a reverse hub's pipe range.
+// It mirrors the "balanced" profile of a normal node (10 to 20 connections); the hub's own
+// max_connections for the node must be at least as large, or its extra pipes are refused.
+const SuggestedReverseMax = 20
+
+// SuggestedReverseMaxFor returns the maximum the menus propose for a hub whose minimum is min.
+func SuggestedReverseMaxFor(min int) int {
+	if min > SuggestedReverseMax {
+		return min
+	}
+	return SuggestedReverseMax
+}
+
 // EffectiveReverseHubs returns the hubs this foreign dials, with defaults applied:
 // ReverseHubs when set, else the single hub described by the legacy
 // ReverseTargets/ReverseConns fields (named "default").

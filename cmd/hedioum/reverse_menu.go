@@ -349,7 +349,7 @@ func addHubMenu(cfg *config.AppConfig) {
 	if !ok {
 		return
 	}
-	max, ok := askInt("Most pipes under load (maximum; same as minimum = fixed):", min)
+	max, ok := askInt("Most pipes under load (maximum; same as minimum = fixed):", config.SuggestedReverseMaxFor(min))
 	if !ok {
 		return
 	}
@@ -395,7 +395,11 @@ func manageHubsMenu(cfg *config.AppConfig) {
 		if !ok {
 			return
 		}
-		max, ok := askInt("Maximum pipes:", cur.MaxConns)
+		suggest := cur.MaxConns
+		if suggest <= cur.MinConns { // a fixed pool: propose the usual range instead of repeating the minimum
+			suggest = config.SuggestedReverseMaxFor(cur.MinConns)
+		}
+		max, ok := askInt("Maximum pipes (the hub's max_connections for this node must be at least this):", suggest)
 		if !ok {
 			return
 		}

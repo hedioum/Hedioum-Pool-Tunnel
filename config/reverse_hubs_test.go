@@ -47,3 +47,13 @@ func TestSyncReverseCompat(t *testing.T) {
 		t.Fatalf("compat fields wrong: conns=%d targets=%+v", cfg.ReverseConns, cfg.ReverseTargets)
 	}
 }
+
+// The menus propose the usual 10 to 20 style range, never a maximum below the minimum.
+func TestSuggestedReverseMaxFor(t *testing.T) {
+	if got := SuggestedReverseMaxFor(DefaultReverseConns); got != SuggestedReverseMax {
+		t.Fatalf("default minimum: got %d, want %d", got, SuggestedReverseMax)
+	}
+	if got := SuggestedReverseMaxFor(30); got != 30 {
+		t.Fatalf("a minimum above the suggestion must not be lowered: got %d", got)
+	}
+}
