@@ -313,7 +313,7 @@ func (np *NodePool) evaluateHealthAndScale() {
 
 	// Watchdog: a node with zero active pipes is a starved pool — surface it and
 	// re-warm immediately (the replenish below does the actual healing).
-	if currentActive == 0 {
+	if currentActive == 0 && np.dialer != nil {
 		slog.Warn("watchdog: pool has no active connections — re-warming", "node", np.Alias, "pool", np.label)
 	}
 	if currentActive < np.minConnections {
@@ -373,6 +373,9 @@ func (np *NodePool) executeScaleUp() {
 }
 
 func (np *NodePool) replenishPool(needed int) {
+	if np.dialer == nil {
+		return // reverse-tunnel pool: the foreign dials in (see reverse.go)
+	}
 	for i := 0; i < needed; i++ {
 		time.Sleep(staggerDelay)
 

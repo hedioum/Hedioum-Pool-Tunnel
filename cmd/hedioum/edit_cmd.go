@@ -419,6 +419,8 @@ func cmdEditNode(args []string) {
 		MaxConnections:      *maxC,
 		BandwidthLimitMbps:  *bw,
 		BandwidthJitterMbps: *jitter,
+		Reverse:             node.Reverse,
+		ReverseListeners:    node.ReverseListeners,
 	})
 	if err := config.SaveConfig(cfg); err != nil {
 		fail("failed to save config: %v", err)

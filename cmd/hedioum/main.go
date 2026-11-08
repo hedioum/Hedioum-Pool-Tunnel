@@ -131,18 +131,28 @@ func runDaemon(cfg *config.AppConfig) {
 
 // handleOpenFirewall opens the foreign egress listen port on the host firewall.
 // It is meant to run as a privileged, short-lived step before the sandboxed
-// daemon starts. The Iran hub listens only on 127.0.0.1, so it needs no rule.
+// daemon starts. A forward-mode Iran hub listens only on 127.0.0.1, so it needs no
+// rule; a reverse node's listener ports are opened too.
 func handleOpenFirewall() {
 	cfg, err := config.LoadConfig()
 	if err != nil {
 		color.Yellow("[-] open-firewall: no configuration yet (%v); nothing to do.", err)
 		return
 	}
-	if cfg.Role != "foreign" {
-		return
+	var ports []int
+	switch cfg.Role {
+	case "foreign":
+		if cfg.ReverseOnly {
+			return // dial-out only: this host listens on nothing
+		}
+		ports = firewallPorts(cfg)
+	case "iran":
+		// The hub listens only on loopback for SOCKS, but a reverse node also accepts
+		// the pipes its foreign dials in, on public ports.
+		ports = reverseFirewallPorts(cfg)
 	}
 
-	for _, port := range firewallPorts(cfg) {
+	for _, port := range ports {
 		backend, err := firewall.EnsurePortOpen(port)
 		switch {
 		case err != nil:

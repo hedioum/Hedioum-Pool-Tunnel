@@ -24,6 +24,11 @@ type Token struct {
 	Persona   string         `json:"persona,omitempty"` // informational: the persona the foreign wears
 	SNI       string         `json:"sni,omitempty"`     // TLS SNI/CN the hub should present ("" = self-signed)
 	Endpoints map[string]int `json:"eps"`               // mimic type -> public port the foreign listens on
+	// Reverse marks a REVERSE-tunnel token printed by the hub: ExitIP is then the HUB's
+	// address and Endpoints are the ports the hub listens on, which the foreign dials
+	// out to. Absent (false) for the usual foreign-printed token, so old tokens decode
+	// unchanged.
+	Reverse bool `json:"rev,omitempty"`
 }
 
 var legacyHex = regexp.MustCompile(`^[A-Fa-f0-9]{32}$`)
