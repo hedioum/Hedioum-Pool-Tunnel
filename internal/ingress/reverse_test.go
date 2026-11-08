@@ -382,3 +382,42 @@ func TestSharedReverseOffKeepsPortsExclusive(t *testing.T) {
 		t.Fatalf("different SNI must not share: %v", problems)
 	}
 }
+
+// TestOneForeignDialsTwoHubs: a single foreign with two hubs keeps each hub's own
+// minimum of pipes open, and both hubs can open streams over theirs.
+func TestOneForeignDialsTwoHubs(t *testing.T) {
+	hm1, port1 := startReverseHub(t, "hubA")
+	hm2, port2 := startReverseHub(t, "hubB")
+	ep := func(port int) []config.Endpoint {
+		return []config.Endpoint{{Target: net.JoinHostPort("127.0.0.1", strconv.Itoa(port)), Mimic: "tls"}}
+	}
+	egress.StartReverseDialOut(&config.AppConfig{
+		Role:        "foreign",
+		AuthToken:   reverseTestToken,
+		ReverseOnly: true,
+		ReverseHubs: []config.ReverseHub{
+			{Name: "a", Targets: ep(port1), MinConns: 3, MaxConns: 3},
+			{Name: "b", Targets: ep(port2), MinConns: 4, MaxConns: 4},
+		},
+	})
+	waitActive(t, hm1, "hubA", 3)
+	waitActive(t, hm2, "hubB", 4)
+	time.Sleep(time.Second)
+	if a, b := hm1.GetStats("hubA").ActiveConns, hm2.GetStats("hubB").ActiveConns; a != 3 || b != 4 {
+		t.Fatalf("each hub must get exactly its own minimum: a=%d (want 3) b=%d (want 4)", a, b)
+	}
+	for name, hm := range map[string]*pool.HubManager{"hubA": hm1, "hubB": hm2} {
+		st, err := hm.GetStreamTCP(name)
+		if err != nil {
+			t.Fatalf("%s: no stream: %v", name, err)
+		}
+		if err := tunproto.WriteSpeedtestHeader(st, tunproto.SpeedDown, 1); err != nil {
+			t.Fatal(err)
+		}
+		_ = st.SetReadDeadline(time.Now().Add(10 * time.Second))
+		if _, err := io.ReadFull(st, make([]byte, 32*1024)); err != nil {
+			t.Fatalf("%s: foreign did not serve the stream: %v", name, err)
+		}
+		st.Close()
+	}
+}

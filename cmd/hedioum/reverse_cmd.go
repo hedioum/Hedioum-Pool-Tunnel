@@ -533,18 +533,10 @@ func applyReverseForeign(cfg *config.AppConfig, token string, conns int, keep bo
 	if conns < 0 {
 		return 0, false, fmt.Errorf("--conns must be positive")
 	}
-	var targets []config.Endpoint
-	for _, ty := range mimicTypesAll {
-		port, ok := pt.Endpoints[ty]
-		if !ok || ty == "ssh" {
-			continue
-		}
-		targets = append(targets, config.Endpoint{
-			Target:     net.JoinHostPort(pt.ExitIP, strconv.Itoa(port)),
-			Mimic:      ty,
-			ServerName: pt.SNI,
-		})
+	if len(cfg.ReverseHubs) > 0 {
+		return 0, false, fmt.Errorf("this foreign dials several hubs; manage them with add-hub / edit-hub / remove-hub (or `reverse-foreign --forward` to reset)")
 	}
+	targets := reverseTargetsFromToken(pt)
 	if len(targets) == 0 {
 		return 0, false, fmt.Errorf("the token has no usable reverse endpoints")
 	}
@@ -558,11 +550,30 @@ func applyReverseForeign(cfg *config.AppConfig, token string, conns int, keep bo
 	return len(targets), keyChanged, nil
 }
 
+// reverseTargetsFromToken turns a reverse pairing token into the hub endpoints the
+// foreign dials (SSH is never reverse-capable).
+func reverseTargetsFromToken(pt *pairing.Token) []config.Endpoint {
+	var targets []config.Endpoint
+	for _, ty := range mimicTypesAll {
+		port, ok := pt.Endpoints[ty]
+		if !ok || ty == "ssh" {
+			continue
+		}
+		targets = append(targets, config.Endpoint{
+			Target:     net.JoinHostPort(pt.ExitIP, strconv.Itoa(port)),
+			Mimic:      ty,
+			ServerName: pt.SNI,
+		})
+	}
+	return targets
+}
+
 // applyForwardForeign restores the normal mode on a foreign config.
 func applyForwardForeign(cfg *config.AppConfig) error {
-	if len(cfg.ReverseTargets) == 0 && !cfg.ReverseOnly {
+	if len(cfg.ReverseTargets) == 0 && len(cfg.ReverseHubs) == 0 && !cfg.ReverseOnly {
 		return fmt.Errorf("this foreign is already in the normal (hub-dials-foreign) mode")
 	}
+	cfg.ReverseHubs = nil
 	cfg.ReverseTargets = nil
 	cfg.ReverseConns = 0
 	cfg.ReverseOnly = false

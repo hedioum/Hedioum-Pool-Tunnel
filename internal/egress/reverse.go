@@ -33,15 +33,36 @@ const (
 	reverseBackoffMax  = 60 * time.Second // cap on the pause after a fully failed round
 )
 
-// reverseDialer keeps ReverseConns pipes open to the hub.
+// Pipe scaling between a hub's min and max: the foreign opens another pipe when the
+// open streams per pipe are high, and closes an idle one after a quiet spell.
+const (
+	reverseScaleUpStreams = 6                // mean open streams per pipe that triggers one more pipe
+	reverseScaleUpGap     = 10 * time.Second // minimum time between two scale-ups
+	reverseIdleShrink     = 3 * time.Minute  // idle time before a pipe above min is closed
+	reverseEarlyClose     = 3 * time.Second  // a pipe the hub drops sooner than this counts as a failed dial
+)
+
+// reverseDialer keeps between min and max authenticated pipes open to one hub.
 type reverseDialer struct {
+	name    string
 	targets []config.Endpoint
 	token   string
-	want    int
+	min     int
+	max     int
 
-	mu       sync.Mutex
-	sessions []*yamux.Session
-	health   map[string]*reverseHealth // keyed by endpoint target
+	mu        sync.Mutex
+	want      int // current target, min <= want <= max
+	sessions  []*reversePipe
+	health    map[string]*reverseHealth // keyed by endpoint target
+	lastUp    time.Time
+	idleSince time.Time
+}
+
+// reversePipe is one live pipe and where it was dialed.
+type reversePipe struct {
+	sess    *yamux.Session
+	target  string
+	started time.Time
 }
 
 type reverseHealth struct {
@@ -49,23 +70,22 @@ type reverseHealth struct {
 	cooldownUntil time.Time
 }
 
-// StartReverseDialOut runs the dial-out loop until the process exits. It is a no-op
-// when the config has no reverse targets.
+// StartReverseDialOut runs one dial-out loop per hub until the process exits. It is a
+// no-op when the config has no reverse hubs.
 func StartReverseDialOut(cfg *config.AppConfig) {
-	if len(cfg.ReverseTargets) == 0 {
-		return
+	for _, h := range cfg.EffectiveReverseHubs() {
+		d := &reverseDialer{
+			name:    h.Name,
+			targets: h.Targets,
+			token:   h.AuthToken,
+			min:     h.MinConns,
+			max:     h.MaxConns,
+			want:    h.MinConns,
+			health:  map[string]*reverseHealth{},
+		}
+		slog.Info("reverse dial-out starting", "hub", d.name, "targets", len(d.targets), "min_pipes", d.min, "max_pipes", d.max)
+		go d.run()
 	}
-	d := &reverseDialer{
-		targets: cfg.ReverseTargets,
-		token:   cfg.AuthToken,
-		want:    cfg.ReverseConns,
-		health:  map[string]*reverseHealth{},
-	}
-	if d.want < 1 {
-		d.want = 12
-	}
-	slog.Info("reverse dial-out starting", "targets", len(d.targets), "pipes", d.want)
-	go d.run()
 }
 
 func (d *reverseDialer) run() {
@@ -75,7 +95,8 @@ func (d *reverseDialer) run() {
 			time.Sleep(backoff)
 		}
 		live := d.liveCount()
-		if live >= d.want {
+		d.rescale(live)
+		if live >= d.currentWant() {
 			backoff = 0
 			time.Sleep(reverseTickEvery)
 			continue
@@ -85,10 +106,59 @@ func (d *reverseDialer) run() {
 		time.Sleep(time.Duration(200+rand.IntN(600)) * time.Millisecond)
 		if err := d.dialOne(); err != nil {
 			backoff = nextBackoff(backoff)
-			slog.Warn("reverse dial failed on every candidate", "err", err, "retry_in", backoff)
+			slog.Warn("reverse dial failed on every candidate", "hub", d.name, "err", err, "retry_in", backoff)
 			continue
 		}
 		backoff = 0
+	}
+}
+
+func (d *reverseDialer) currentWant() int {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.want
+}
+
+// rescale moves the target pipe count between min and max from the current load: one
+// more pipe when the streams per pipe are high (at most one step per reverseScaleUpGap),
+// one fewer after reverseIdleShrink without any open stream. The oldest idle pipe is
+// closed on a shrink; the hub simply sees it end.
+func (d *reverseDialer) rescale(live int) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.max <= d.min {
+		d.want = d.min
+		return
+	}
+	streams := 0
+	for _, p := range d.sessions {
+		streams += p.sess.NumStreams()
+	}
+	now := time.Now()
+	switch {
+	case live > 0 && streams >= reverseScaleUpStreams*live && d.want < d.max && now.Sub(d.lastUp) >= reverseScaleUpGap && live >= d.want:
+		d.want++
+		d.lastUp = now
+		d.idleSince = time.Time{}
+		slog.Info("reverse pipes scaling up", "hub", d.name, "pipes", d.want, "streams", streams)
+	case streams == 0:
+		if d.idleSince.IsZero() {
+			d.idleSince = now
+		}
+		if now.Sub(d.idleSince) >= reverseIdleShrink && d.want > d.min {
+			d.want--
+			d.idleSince = now
+			for i, p := range d.sessions { // oldest first
+				if p.sess.NumStreams() == 0 {
+					_ = p.sess.Close()
+					d.sessions = append(d.sessions[:i], d.sessions[i+1:]...)
+					break
+				}
+			}
+			slog.Info("reverse pipes scaling down", "hub", d.name, "pipes", d.want)
+		}
+	default:
+		d.idleSince = time.Time{}
 	}
 }
 
@@ -103,18 +173,28 @@ func nextBackoff(cur time.Duration) time.Duration {
 	return cur
 }
 
-// liveCount prunes closed sessions and returns how many pipes are still up.
+// liveCount prunes closed sessions and returns how many pipes are still up. A pipe
+// the hub drops within seconds of the handshake (the hub's pool is full, or it does not
+// know this token) counts against its endpoint, so a misconfigured hub cools down
+// instead of being redialed in a tight loop.
 func (d *reverseDialer) liveCount() int {
 	d.mu.Lock()
-	defer d.mu.Unlock()
+	var early []string
 	kept := d.sessions[:0]
-	for _, s := range d.sessions {
-		if !s.IsClosed() {
-			kept = append(kept, s)
+	for _, p := range d.sessions {
+		if !p.sess.IsClosed() {
+			kept = append(kept, p)
+		} else if time.Since(p.started) < reverseEarlyClose {
+			early = append(early, p.target)
 		}
 	}
 	d.sessions = kept
-	return len(kept)
+	n := len(kept)
+	d.mu.Unlock()
+	for _, t := range early {
+		d.record(t, false)
+	}
+	return n
 }
 
 // order returns the candidate endpoints for one dial: reachable ones in random order
@@ -170,15 +250,15 @@ func (d *reverseDialer) dialOne() error {
 		session, err := dialReverse(ep, d.token)
 		if err != nil {
 			d.record(ep.Target, false)
-			slog.Warn("reverse pipe dial failed", "mimic", ep.Mimic, "target", ep.Target, "err", err)
+			slog.Warn("reverse pipe dial failed", "hub", d.name, "mimic", ep.Mimic, "target", ep.Target, "err", err)
 			lastErr = err
 			continue
 		}
 		d.record(ep.Target, true)
-		slog.Info("reverse pipe established", "mimic", ep.Mimic, "target", ep.Target)
+		slog.Info("reverse pipe established", "hub", d.name, "mimic", ep.Mimic, "target", ep.Target)
 
 		d.mu.Lock()
-		d.sessions = append(d.sessions, session)
+		d.sessions = append(d.sessions, &reversePipe{sess: session, target: ep.Target, started: time.Now()})
 		d.mu.Unlock()
 		go handleYamuxSession(session)
 		return nil
