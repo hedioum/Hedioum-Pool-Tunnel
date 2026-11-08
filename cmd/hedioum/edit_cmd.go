@@ -189,6 +189,10 @@ func cmdEditForeign(args []string) {
 	httpDecoyPort := fs.Int("http-decoy-port", cfg.HTTPDecoyPort, "plaintext web decoy port (0 disables)")
 	token := fs.String("token", "", "set a specific new auth token (default: keep current)")
 	rotateToken := fs.Bool("rotate-token", false, "generate a fresh auth token")
+	portsSpec := fs.String("ports", "", "set listener ports as TYPE=PORT,... (any mimic type)")
+	bind := fs.String("bind", cfg.ListenBind, "address the listeners bind to (127.0.0.1 behind a front proxy; '' = all interfaces)")
+	proxyProto := fs.Bool("proxy-protocol", cfg.ProxyProtocol, "require a PROXY protocol header from a front proxy (nginx proxy_protocol on / HAProxy send-proxy)")
+	advertise := fs.String("advertise-ports", formatTypePorts(cfg.AdvertisePorts), "public ports a hub should dial as TYPE=PORT,... when a front proxy forwards them to the listeners")
 	_ = fs.Parse(args)
 	setFlags := map[string]bool{}
 	fs.Visit(func(f *flag.Flag) { setFlags[f.Name] = true })
@@ -254,6 +258,13 @@ func cmdEditForeign(args []string) {
 	for _, ty := range []string{"https-alt", "docker", "grafana", "prometheus", "cpanel", "whm", "webmail", "postgres", "mysql"} {
 		portMap[ty] = ports[ty]
 	}
+	if ov, perr := parseTypePortList(*portsSpec); perr != nil {
+		fail("--ports: %v", perr)
+	} else {
+		for ty, p := range ov {
+			portMap[ty] = p
+		}
+	}
 	for label, p := range portMap {
 		if err := validPort(p); err != nil {
 			fail("--%s-port: %v", label, err)
@@ -276,6 +287,18 @@ func cmdEditForeign(args []string) {
 	}
 	cfg.HTTPDecoyPort = hd
 	cfg.AuthToken = newToken
+
+	advMap, aerr := parseTypePortList(*advertise)
+	if aerr != nil {
+		fail("--advertise-ports: %v", aerr)
+	}
+	warns, perr := applyForeignFrontProxy(cfg, foreignProxyOpts{Bind: bind, ProxyProtocol: proxyProto, Advertise: advMap, AdvertiseSet: true})
+	if perr != nil {
+		fail("%v", perr)
+	}
+	for _, w := range warns {
+		color.Yellow("[!] %s", w)
+	}
 
 	if err := config.SaveConfig(cfg); err != nil {
 		fail("failed to save config: %v", err)
@@ -324,6 +347,7 @@ func cmdEditNode(args []string) {
 	imapsPort := fs.Int("imaps-port", ports["imaps"], "foreign IMAPS mimic port")
 	daPort := fs.Int("directadmin-port", ports["directadmin"], "foreign DirectAdmin mimic port")
 	tlsServerName := fs.String("tls-servername", firstEndpointSNI(*node), "TLS SNI (the foreign's domain, for a real cert)")
+	nodePorts := fs.String("ports", "", "set endpoint ports as TYPE=PORT,... (any mimic type, e.g. https-alt=443)")
 	socksPort := fs.Int("socks-port", node.LocalSocksPort, "local SOCKS5 bind port")
 	socksBind := fs.String("socks-bind", node.SocksBind, "SOCKS5 bind address (container veth IP / 0.0.0.0 for LAN clients; trusted networks only)")
 	minC := fs.Int("min", node.MinConnections, "min warm-up connections")
@@ -388,6 +412,13 @@ func cmdEditNode(args []string) {
 	// (conventional default or the value already pinned in config); no extra flags.
 	for _, ty := range []string{"https-alt", "docker", "grafana", "prometheus", "cpanel", "whm", "webmail", "postgres", "mysql"} {
 		portMap[ty] = ports[ty]
+	}
+	if ov, perr := parseTypePortList(*nodePorts); perr != nil {
+		fail("--ports: %v", perr)
+	} else {
+		for ty, p := range ov {
+			portMap[ty] = p
+		}
 	}
 	for label, p := range portMap {
 		if err := validPort(p); err != nil {

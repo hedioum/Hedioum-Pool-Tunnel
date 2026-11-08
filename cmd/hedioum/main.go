@@ -162,6 +162,9 @@ func handleOpenFirewall() {
 // gets a rule — not just the legacy SSH port. Falls back to the legacy port only
 // if Mimics is somehow empty.
 func firewallPorts(cfg *config.AppConfig) []int {
+	if isLoopbackBind(cfg.ListenBind) {
+		return nil // listeners are only reachable through the front proxy: nothing to open
+	}
 	ports := make([]int, 0, len(cfg.Mimics))
 	for _, ml := range cfg.Mimics {
 		if ml.Port != 0 {
