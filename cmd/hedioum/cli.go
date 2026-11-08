@@ -110,6 +110,8 @@ Usage:
       Advanced (hub, default off): let several reverse nodes share ONE listener / SNI; the
       hub tells them apart by token. Join a node with reverse-iran --alias NEW --share-with OLD
   hedioum-tunnel front-proxy [--alias NAME] [--kind nginx|haproxy] [--public-port 443]
+      [--by-source | --source-ips IP,IP]  route by the connecting IP, so the tunnel can share an
+      SNI with a real service (the foreign servers' IPs go to the tunnel, everyone else by SNI)
       Print the nginx/HAProxy config that routes the tunnel's SNI to its listener
       (on the hub: --alias of a reverse node; on a foreign: its own listener)
   hedioum-tunnel pairing-token [--public-ip IP]

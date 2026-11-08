@@ -80,10 +80,50 @@ hedioum-tunnel reverse-foreign --forward                # on the foreign
   `max_connections`. Because only the foreign dials, the pool does **not** scale up under
   load the way forward mode does: raise `--conns` for more throughput. Retiring pipes
   (the usual lifecycle churn) are replaced automatically by the foreign redialling.
+- **Several hubs per foreign.** One reverse foreign can dial more than one Iran hub, each
+  with its own pipe range, because the foreign is the side that dials:
+
+  ```
+  hedioum-tunnel add-hub --token <TOKEN from reverse-iran on that hub> --name ir2 --min 4 --max 16
+  hedioum-tunnel edit-hub --name ir2 --max 24
+  hedioum-tunnel list-hubs
+  hedioum-tunnel remove-hub --name ir2
+  ```
+
+  The foreign always keeps `--min` pipes open to a hub and opens more, up to `--max`, while
+  the open streams per pipe stay high (about 6 or more); an idle pipe above `--min` is
+  closed after a few quiet minutes. Without `--max` the pool is fixed at `--min`
+  (default 12). Keep the hub node's `max_connections` at or above `--max`, otherwise the hub
+  drops the extra pipes (the foreign cools that endpoint down instead of redialling in a
+  loop). Bandwidth and jitter shaping stay on each hub's node (`edit-node` there), so every
+  hub has its own. A hub may know the foreign by a different token than the foreign's own;
+  the token inside the pairing token is then stored for that hub only. A foreign with a
+  single hub keeps `reverse_targets` / `reverse_conns` and behaves as before; adding a
+  second hub promotes it to a hub named `default`. `reverse-foreign --forward` clears all
+  hubs.
+- **Several foreign servers on one listener (advanced, off by default).** Normally every
+  reverse node needs its own listener port, because a node's listener only knows that
+  node's token. With `shared_reverse_auth` on, nodes whose listener has the same bind
+  address, port, type, SNI and PROXY protocol setting share one socket, and the hub tells
+  them apart by which node token authenticates the handshake (the handshake itself is
+  unchanged: the client's HMAC is checked against each node token, and the pipe is adopted
+  by the node that matched). This is what lets one SNI behind a front proxy carry several
+  foreign servers.
+
+  ```
+  hedioum-tunnel reverse-shared-auth --on
+  hedioum-tunnel reverse-iran --alias A --sni t.example.com ...        # first node, as usual
+  hedioum-tunnel reverse-iran --alias B --share-with A                  # B joins A's listener
+  hedioum-tunnel reverse-shared-auth --off                              # refused while any listener is shared
+  ```
+
+  The shared listener serves a single decoy and certificate (A's SNI). The SSH mimic cannot
+  be shared.
 - **Diagnostics.** `probe` and `speedtest` open their own connection to the foreign and do
   not apply to a reverse node (they say so); `test` still runs the end-to-end SOCKS egress
   checks. Look for `reverse pipe established` in `journalctl -u hedioum.service` on both
   ends.
 - **Config.** Reverse nodes add `reverse` / `reverse_listeners` to a hub node and
-  `reverse_targets` / `reverse_conns` / `reverse_only` to the foreign config. Existing
-  configs and pairing tokens load unchanged.
+  `reverse_targets` / `reverse_conns` / `reverse_only` (and optionally `reverse_hubs`) to the
+  foreign config, and an optional `shared_reverse_auth` to the hub. Existing configs and
+  pairing tokens load unchanged.

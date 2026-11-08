@@ -100,6 +100,28 @@ backend hedioum
     server hub 127.0.0.1:8443 send-proxy     # drop send-proxy if the listener has no PROXY protocol
 ```
 
+## Sharing an SNI with a real service (route by source IP)
+
+SNI routing needs the tunnel to have its own SNI. If you want the tunnel on the **same**
+name as a real service on that port (say `i1.example.com`, which also carries user
+configs), the proxy cannot tell them apart by SNI. It can tell them apart by who connects:
+the tunnel's peers are your own servers, with known addresses. `front-proxy --by-source`
+prints a configuration that sends those addresses to the tunnel listener whatever SNI they
+present, while every other client keeps following the SNI map exactly as before.
+
+```
+# hub (reverse mode): the node's foreign IP, plus any node sharing its listener
+hedioum-tunnel front-proxy --alias NAME --by-source
+# or name the addresses yourself (a foreign lists the hub IP instead)
+hedioum-tunnel front-proxy --alias NAME --source-ips 203.0.113.10,203.0.113.20 --kind haproxy
+```
+
+For nginx this is a second `map $remote_addr $tunnel_or_sni` whose default is your existing
+SNI map; HAProxy gets `use_backend hedioum if { src ... }` ahead of the SNI rules. Only exact
+addresses are accepted. The source address is the TCP peer the proxy sees, so it only works
+when clients reach the proxy directly (not through a CDN), and a listed address that changes
+has to be updated in the proxy. The tunnel's TLS and token authentication are untouched.
+
 ## Going back
 
 Foreign: `edit-foreign --advertise-ports "" --bind "" --proxy-protocol=false`. Hub:
