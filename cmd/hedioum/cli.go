@@ -33,6 +33,8 @@ func runSubcommand(name string, args []string) {
 		cmdReverseIran(args)
 	case "front-proxy":
 		cmdFrontProxy(args)
+	case "pairing-token":
+		cmdPairingToken(args)
 	case "reverse-foreign":
 		cmdReverseForeign(args)
 	case "install":
@@ -90,8 +92,11 @@ Usage:
       dialing the foreign) and print a reverse pairing token; --forward flips it back
       Behind nginx/HAProxy on a shared port: --sni NAME --advertise-ports TYPE=443
       --bind 127.0.0.1 [--proxy-protocol]  (settings are remembered per node)
-  hedioum-tunnel front-proxy --alias NAME [--kind nginx|haproxy] [--public-port 443]
-      Print the nginx/HAProxy config that routes the node's SNI to its listener
+  hedioum-tunnel front-proxy [--alias NAME] [--kind nginx|haproxy] [--public-port 443]
+      Print the nginx/HAProxy config that routes the tunnel's SNI to its listener
+      (on the hub: --alias of a reverse node; on a foreign: its own listener)
+  hedioum-tunnel pairing-token [--public-ip IP]
+      (foreign) Print the paste-only pairing token for the hub, honoring --advertise-ports
   hedioum-tunnel reverse-foreign --token REVERSE_TOKEN [--conns N] [--keep-listeners] [--forward]
       Make this foreign dial out to the hub (paste the token from reverse-iran);
       --forward restores the normal inbound mode

@@ -49,6 +49,18 @@ type AppConfig struct {
 	// Mimics lists the camouflage listeners the foreign runs (SSH, TLS, ...). If
 	// empty, a single SSH listener is synthesized from ForeignListenPort/DecoyPort.
 	Mimics []MimicListener `json:"mimics,omitempty"`
+	// ListenBind is the address the mimic listeners bind to ("" = all interfaces). Use
+	// "127.0.0.1" when a front proxy (nginx stream, HAProxy) owns the public port and
+	// forwards the tunnel's SNI to the listener.
+	ListenBind string `json:"listen_bind,omitempty"`
+	// ProxyProtocol makes the TLS-family mimic listeners require a PROXY protocol header
+	// (v1 or v2), as sent by a front proxy with `proxy_protocol on` (nginx) / `send-proxy`
+	// (HAProxy). Connections without one are dropped, so use it with a loopback ListenBind.
+	ProxyProtocol bool `json:"proxy_protocol,omitempty"`
+	// AdvertisePorts maps a mimic type to the public port a hub should dial when it
+	// differs from the port the listener binds (a front proxy listens on 443 and forwards
+	// to the listener). Used for the pairing token and the hub commands.
+	AdvertisePorts map[string]int `json:"advertise_ports,omitempty"`
 
 	// Reverse tunnel (foreign side). When ReverseTargets is set, this foreign node
 	// DIALS OUT to the Iran hub instead of waiting for the hub to dial in: it keeps

@@ -49,6 +49,7 @@ func runInteractiveDashboard(cfg *config.AppConfig) {
 				"5. Check Egress IP Reputation",
 				"6. Restart the Service",
 				"7. Reverse Mode: Dial the Hub (when the hub can't reach this server)",
+				"8. Front Proxy: share a port such as 443 with nginx / HAProxy",
 			)
 		}
 
@@ -184,6 +185,9 @@ func runInteractiveDashboard(cfg *config.AppConfig) {
 
 		case strings.Contains(action, "Reverse Tunnel: Switch a Node"):
 			runReverseIranMenu(cfg)
+
+		case strings.Contains(action, "Front Proxy: share a port"):
+			runForeignFrontProxyMenu(cfg)
 
 		case strings.Contains(action, "Reverse Mode: Dial the Hub"):
 			runReverseForeignMenu(cfg)

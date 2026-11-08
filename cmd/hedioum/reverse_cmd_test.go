@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/hedioum/Hedioum-Pool-Tunnel/config"
+	"github.com/hedioum/Hedioum-Pool-Tunnel/internal/pairing"
 )
 
 func TestReverseCapableTypesDropsSSH(t *testing.T) {
@@ -363,5 +364,104 @@ func TestFrontProxySnippets(t *testing.T) {
 	node.ReverseListeners[0].ServerName = ""
 	if _, err := nginxSnippet(node, 443); err == nil {
 		t.Error("without an SNI the proxy cannot recognise the tunnel")
+	}
+}
+
+func foreignTestCfg() *config.AppConfig {
+	return &config.AppConfig{
+		Role: "foreign", AuthToken: "0123456789abcdef0123456789abcdef",
+		Mimics: []config.MimicListener{
+			{Type: "ssh", Port: 22},
+			{Type: "tls", Port: 8443, ServerName: "i3.example.test"},
+		},
+	}
+}
+
+func TestParseTypePortList(t *testing.T) {
+	got, err := parseTypePortList("tls=443, https-alt=8443,ssh=2222")
+	if err != nil || got["tls"] != 443 || got["https-alt"] != 8443 || got["ssh"] != 2222 {
+		t.Fatalf("got %v err=%v", got, err)
+	}
+	if m, err := parseTypePortList(""); err != nil || len(m) != 0 {
+		t.Fatalf("empty must be an empty map: %v %v", m, err)
+	}
+	for _, bad := range []string{"tls", "tls=x", "tls=0", "nope=443"} {
+		if _, err := parseTypePortList(bad); err == nil {
+			t.Errorf("%q should fail", bad)
+		}
+	}
+	if got := formatTypePorts(map[string]int{"tls": 443, "https-alt": 8443}); got != "https-alt=8443,tls=443" {
+		t.Fatalf("formatTypePorts = %q", got)
+	}
+}
+
+func TestForeignFrontProxySettings(t *testing.T) {
+	cfg := foreignTestCfg()
+	warns, err := applyForeignFrontProxy(cfg, foreignProxyOpts{Bind: sp("127.0.0.1"), ProxyProtocol: bp(true), Advertise: map[string]int{"tls": 443}, AdvertiseSet: true})
+	if err != nil || len(warns) != 0 {
+		t.Fatalf("err=%v warns=%v", err, warns)
+	}
+	if cfg.ListenBind != "127.0.0.1" || !cfg.ProxyProtocol || cfg.AdvertisePorts["tls"] != 443 {
+		t.Fatalf("not stored: %+v", cfg)
+	}
+	// Not touching the proxy flags keeps them.
+	if _, err := applyForeignFrontProxy(cfg, foreignProxyOpts{}); err != nil || cfg.AdvertisePorts["tls"] != 443 {
+		t.Fatalf("a no-op must keep the settings: %v %+v", err, cfg.AdvertisePorts)
+	}
+	// Rejections.
+	if _, err := applyForeignFrontProxy(cfg, foreignProxyOpts{Advertise: map[string]int{"ssh": 443}, AdvertiseSet: true}); err == nil {
+		t.Error("SSH cannot be fronted by SNI")
+	}
+	if _, err := applyForeignFrontProxy(cfg, foreignProxyOpts{Advertise: map[string]int{"smtps": 443}, AdvertiseSet: true}); err == nil {
+		t.Error("advertising a type the foreign does not run must fail")
+	}
+	if _, err := applyForeignFrontProxy(cfg, foreignProxyOpts{Bind: sp("nope")}); err == nil {
+		t.Error("an invalid bind must fail")
+	}
+	noSNI := foreignTestCfg()
+	noSNI.Mimics[1].ServerName = ""
+	if _, err := applyForeignFrontProxy(noSNI, foreignProxyOpts{Advertise: map[string]int{"tls": 443}, AdvertiseSet: true}); err == nil {
+		t.Error("a front proxy needs an SNI")
+	}
+	// Unprotected listeners are warned about.
+	loose := foreignTestCfg()
+	warns, err = applyForeignFrontProxy(loose, foreignProxyOpts{ProxyProtocol: bp(true), Advertise: map[string]int{"tls": 443}, AdvertiseSet: true})
+	if err != nil || len(warns) == 0 {
+		t.Fatalf("expected warnings for a non-loopback bind: %v %v", err, warns)
+	}
+	// Clearing.
+	if _, err := applyForeignFrontProxy(cfg, foreignProxyOpts{Bind: sp(""), ProxyProtocol: bp(false), AdvertiseSet: true}); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.ListenBind != "" || cfg.ProxyProtocol || cfg.AdvertisePorts != nil {
+		t.Fatalf("clear failed: %+v", cfg)
+	}
+}
+
+func TestForeignTokenAndSnippet(t *testing.T) {
+	cfg := foreignTestCfg()
+	if _, err := applyForeignFrontProxy(cfg, foreignProxyOpts{Bind: sp("127.0.0.1"), ProxyProtocol: bp(true), Advertise: map[string]int{"tls": 443}, AdvertiseSet: true}); err != nil {
+		t.Fatal(err)
+	}
+	// The pairing token carries the advertised port, so the hub dials the proxy.
+	tok := foreignPairingToken(cfg, "198.51.100.7")
+	pt, isV2, err := pairing.Decode(tok)
+	if err != nil || !isV2 || pt.Endpoints["tls"] != 443 || pt.Endpoints["ssh"] != 22 || pt.SNI != "i3.example.test" {
+		t.Fatalf("token wrong: %+v err=%v", pt, err)
+	}
+	sp, err := foreignFrontSpec(cfg)
+	if err != nil || sp.Upstream != "127.0.0.1:8443" || sp.SNI != "i3.example.test" || !sp.ProxyProtocol {
+		t.Fatalf("spec = %+v err=%v", sp, err)
+	}
+	ng := nginxFor(sp, 443)
+	if !strings.Contains(ng, "i3.example.test  127.0.0.1:8443;") || !strings.Contains(ng, "proxy_protocol on;") {
+		t.Fatalf("nginx snippet wrong:\n%s", ng)
+	}
+	if hp := haproxyFor(sp, 443); !strings.Contains(hp, "send-proxy") {
+		t.Fatalf("haproxy snippet wrong:\n%s", hp)
+	}
+	cfg.Mimics[1].ServerName, cfg.Domain = "", ""
+	if _, err := foreignFrontSpec(cfg); err == nil {
+		t.Fatal("no SNI: no spec")
 	}
 }

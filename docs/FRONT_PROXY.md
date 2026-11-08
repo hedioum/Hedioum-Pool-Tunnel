@@ -1,16 +1,19 @@
 # Sharing a port with the tunnel (nginx / HAProxy in front)
 
-A reverse-tunnel hub (see [REVERSE.md](REVERSE.md)) has to be reachable from the foreign
-on a public port, and the best port is 443. But 443 is usually needed for something else
-on the hub too: a panel, user configs, a website. If Hedioum owns 443, nothing else can.
+The side of the tunnel that **listens** needs a public port, and the best port is 443.
+But 443 is usually needed for something else on the same server too: a panel, user
+configs, a website. If Hedioum owns 443, nothing else can.
 
-A TCP front proxy solves that. It listens on 443, reads only the TLS **SNI** (it does not
-terminate TLS) and forwards each connection to the right place. The tunnel gets its own
-SNI; everything else keeps going where it went before.
+- In the default (direct) mode the **foreign** egress listens and the Iran hub dials it.
+- In [reverse mode](REVERSE.md) the **Iran hub** listens and the foreign dials it.
+
+Either listener can sit behind a TCP front proxy. The proxy owns 443, reads only the TLS
+**SNI** (it does not terminate TLS) and forwards each connection to the right place. The
+tunnel gets its own SNI; everything else keeps going where it went before.
 
 ```
-foreign ──443, SNI=cdn.example.com──▶ nginx/HAProxy ──▶ 127.0.0.1:8443  (hub listener)
-users   ──443, SNI=anything else ───▶ nginx/HAProxy ──▶ your panel / xray / website
+dialer ──443, SNI=cdn.example.com──▶ nginx/HAProxy ──▶ 127.0.0.1:8443  (tunnel listener)
+users  ──443, any other SNI───────▶ nginx/HAProxy ──▶ your panel / xray / website
 ```
 
 Rules of thumb:
@@ -18,45 +21,51 @@ Rules of thumb:
 - The proxy must **pass TCP through** (nginx `stream` + `ssl_preread`, HAProxy `mode tcp`).
   The tunnel does its own TLS and authentication; terminating TLS in the proxy breaks it.
 - The tunnel's SNI must not be a name your other services use, otherwise the proxy cannot
-  tell them apart. Any name works (it needs no DNS record and no certificate), e.g. a
-  sub-domain-looking label next to the SNIs you already use.
-- One SNI maps to one listener, so behind a proxy a node serves one mimic type.
+  tell them apart. Any name works (it needs no DNS record and no certificate).
+- One SNI maps to one listener, so behind a proxy a server fronts one mimic type per
+  public port. SSH cannot be routed by SNI.
 
-## Setting it up from the CLI
+The same four settings apply on both sides:
+
+| setting | what it does |
+| --- | --- |
+| listen port | where the tunnel listener binds (a free local port, e.g. 8443) |
+| advertise port | the port the dialer is told to use (the proxy's public port, 443) |
+| bind `127.0.0.1` | keeps the listener off the public interface; the host firewall opens nothing for it |
+| PROXY protocol | the listener requires a PROXY header (v1/v2) from a proxy that sends one (nginx `proxy_protocol on;`, HAProxy `send-proxy`); connections without one are dropped |
+
+These are remembered; a later edit keeps them unless you change them. `front-proxy`
+prints the proxy configuration (it only prints, it never edits your files); the
+interactive menu asks the same questions.
+
+## Foreign (direct mode)
+
+```
+hedioum-tunnel edit-foreign --tls-servername cdn.example.com \
+    --ports tls=8443 --advertise-ports tls=443 --bind 127.0.0.1 [--proxy-protocol]
+hedioum-tunnel front-proxy --kind nginx          # config for this foreign
+hedioum-tunnel pairing-token                     # new paste-only token (advertised ports)
+```
+
+On the Iran hub point the existing node at the proxy, or add it with the new token:
+
+```
+hedioum-tunnel edit-node --alias NAME --ports tls=443 --tls-servername cdn.example.com
+```
+
+Menu: **Front Proxy: share a port such as 443 with nginx / HAProxy**.
+
+## Iran hub (reverse mode)
 
 ```
 hedioum-tunnel reverse-iran --alias NAME \
-    --ports https-alt=8443 \
-    --advertise-ports https-alt=443 \
-    --sni cdn.example.com \
-    --bind 127.0.0.1 \
-    [--proxy-protocol]
+    --ports https-alt=8443 --advertise-ports https-alt=443 \
+    --sni cdn.example.com --bind 127.0.0.1 [--proxy-protocol]
+hedioum-tunnel front-proxy --alias NAME --kind nginx
 ```
 
-- `--ports` is where the hub **listens** (a free local port).
-- `--advertise-ports` is where the foreign is told to **dial** (the proxy's public port).
-  Only the advertised mimic types are served.
-- `--sni` is the name the foreign sends and the hub's certificate is issued for.
-- `--bind 127.0.0.1` keeps the listener off the public interface, so it is only reachable
-  through the proxy (the host firewall then opens nothing for it).
-- `--proxy-protocol` makes the listener require a PROXY protocol header (v1 or v2), for a
-  proxy that adds one (nginx `proxy_protocol on;`, HAProxy `send-proxy`). Connections
-  without a header are dropped. Use it when the proxy's stream server already uses the
-  PROXY protocol for its other upstreams.
-
-These settings are remembered per node; a later `reverse-iran --alias NAME` keeps them
-unless you pass the flags again (`--advertise-ports ""` / `--bind ""` clear them). The same
-questions are asked in the interactive menu ("Reverse Tunnel: Switch a Node ..." >
-"Through a reverse proxy").
-
-Print the proxy configuration for a node (it only prints, it never edits your files):
-
-```
-hedioum-tunnel front-proxy --alias NAME --kind nginx      # or haproxy
-```
-
-Then `nginx -t && systemctl reload nginx`, and run the `reverse-foreign --token ...` line
-`reverse-iran` printed on the foreign.
+Run the printed `reverse-foreign --token ...` line on the foreign. Menu: **Reverse Tunnel:
+Switch a Node Normal <-> Reverse** > "Through a reverse proxy".
 
 ## nginx
 
@@ -72,8 +81,8 @@ map $ssl_preread_server_name $backend {
 ```
 
 PROXY protocol must match on both sides: if that stream server has `proxy_protocol on;`
-(each upstream then receives the header), use `--proxy-protocol` on the node. If it does
-not, leave the flag off.
+(each upstream then receives the header), enable the PROXY protocol on the tunnel listener
+too. If it does not, leave it off. Then `nginx -t && systemctl reload nginx`.
 
 ## HAProxy
 
@@ -88,11 +97,11 @@ frontend tls_in
 
 backend hedioum
     mode tcp
-    server hub 127.0.0.1:8443 send-proxy     # drop send-proxy if the node has no --proxy-protocol
+    server hub 127.0.0.1:8443 send-proxy     # drop send-proxy if the listener has no PROXY protocol
 ```
 
 ## Going back
 
-`reverse-iran --alias NAME --advertise-ports "" --bind "" --proxy-protocol=false` returns
-the node to direct listeners; `--forward` leaves reverse mode altogether and clears these
-settings.
+Foreign: `edit-foreign --advertise-ports "" --bind "" --proxy-protocol=false`. Hub:
+`reverse-iran --alias NAME --advertise-ports "" --bind "" --proxy-protocol=false`
+(or `--forward` to leave reverse mode, which clears the settings).
