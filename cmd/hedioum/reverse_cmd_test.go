@@ -48,3 +48,131 @@ func TestReverseFirewallPorts(t *testing.T) {
 		t.Fatalf("a hub without reverse nodes opens nothing, got %v", got)
 	}
 }
+
+func fakePortsInUse(t *testing.T, used ...int) {
+	t.Helper()
+	old := portInUse
+	portInUse = func(p int) bool {
+		for _, u := range used {
+			if u == p {
+				return true
+			}
+		}
+		return false
+	}
+	t.Cleanup(func() { portInUse = old })
+}
+
+func planTestNode(alias string, eps ...config.Endpoint) config.ForeignNode {
+	return config.ForeignNode{Alias: alias, AuthToken: "0123456789abcdef0123456789abcdef", Endpoints: eps}
+}
+
+// A node whose port is free keeps it; a port taken on the host (443 here) moves to a
+// free candidate, and the move is reported.
+func TestPlanReverseMovesTakenPorts(t *testing.T) {
+	fakePortsInUse(t, 443)
+	n := planTestNode("a",
+		config.Endpoint{Target: "1.2.3.4:443", Mimic: "tls"},
+		config.Endpoint{Target: "1.2.3.4:8443", Mimic: "https-alt"},
+	)
+	cfg := &config.AppConfig{Role: "iran", ForeignNodes: []config.ForeignNode{n}}
+	plan, err := planReverse(cfg, &cfg.ForeignNodes[0], nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.Endpoints["https-alt"] != 8443 {
+		t.Fatalf("a free port must be kept: %v", plan.Endpoints)
+	}
+	tlsPort := plan.Endpoints["tls"]
+	if tlsPort == 443 || tlsPort == 8443 || tlsPort == 0 {
+		t.Fatalf("tls must move to a free, distinct port, got %d", tlsPort)
+	}
+	if plan.Moved["tls"] != 443 || len(plan.Moved) != 1 {
+		t.Fatalf("moved = %v", plan.Moved)
+	}
+}
+
+func TestPlanReverseExplicitPortInUseIsAnError(t *testing.T) {
+	fakePortsInUse(t, 443)
+	n := planTestNode("a", config.Endpoint{Target: "1.2.3.4:443", Mimic: "tls"})
+	cfg := &config.AppConfig{Role: "iran", ForeignNodes: []config.ForeignNode{n}}
+	if _, err := planReverse(cfg, &cfg.ForeignNodes[0], map[string]int{"tls": 443}); err == nil {
+		t.Fatal("an explicitly requested port that is taken must fail")
+	}
+}
+
+// A second reverse node never reuses the first one's ports, and a node that is
+// already reverse does not see its own listeners as a conflict.
+func TestPlanReverseAvoidsOtherNodesAndOwnListeners(t *testing.T) {
+	fakePortsInUse(t, 8443) // held by node "a"'s own running listener
+	a := planTestNode("a", config.Endpoint{Target: "1.2.3.4:8443", Mimic: "https-alt"})
+	a.Reverse = true
+	a.ReverseListeners = []config.MimicListener{{Type: "https-alt", Port: 8443}}
+	b := planTestNode("b", config.Endpoint{Target: "5.6.7.8:8443", Mimic: "https-alt"})
+	cfg := &config.AppConfig{Role: "iran", ForeignNodes: []config.ForeignNode{a, b}}
+
+	planB, err := planReverse(cfg, &cfg.ForeignNodes[1], nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if planB.Endpoints["https-alt"] == 8443 {
+		t.Fatal("node b must not take node a's port")
+	}
+	planA, err := planReverse(cfg, &cfg.ForeignNodes[0], nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if planA.Endpoints["https-alt"] != 8443 || len(planA.Moved) != 0 {
+		t.Fatalf("a re-plan must keep node a's own port: %+v", planA)
+	}
+}
+
+func TestApplyReverseIranAndForward(t *testing.T) {
+	fakePortsInUse(t)
+	n := planTestNode("a", config.Endpoint{Target: "1.2.3.4:8443", Mimic: "https-alt"})
+	other := planTestNode("keep", config.Endpoint{Target: "9.9.9.9:443", Mimic: "tls"})
+	cfg := &config.AppConfig{Role: "iran", ForeignNodes: []config.ForeignNode{n, other}}
+
+	plan, tok, err := applyReverseIran(cfg, "a", nil, "198.51.100.7")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.ForeignNodes[0].Reverse || len(plan.Listeners) != 1 || tok == "" {
+		t.Fatalf("node a not flipped: %+v tok=%q", cfg.ForeignNodes[0], tok)
+	}
+	if cfg.ForeignNodes[1].Reverse {
+		t.Fatal("other nodes must stay in the normal mode")
+	}
+	if _, _, err := applyReverseIran(cfg, "nope", nil, "198.51.100.7"); err == nil {
+		t.Fatal("unknown alias must fail")
+	}
+
+	// The foreign side consumes that token.
+	fcfg := &config.AppConfig{Role: "foreign", AuthToken: "old"}
+	cnt, changed, err := applyReverseForeign(fcfg, tok, 0, false)
+	if err != nil || cnt != 1 || !changed {
+		t.Fatalf("foreign apply: n=%d changed=%v err=%v", cnt, changed, err)
+	}
+	if !fcfg.ReverseOnly || len(fcfg.ReverseTargets) != 1 || fcfg.AuthToken != n.AuthToken {
+		t.Fatalf("foreign config wrong: %+v", fcfg)
+	}
+	if err := applyForwardForeign(fcfg); err != nil || len(fcfg.ReverseTargets) != 0 || fcfg.ReverseOnly {
+		t.Fatalf("foreign forward: %v %+v", err, fcfg)
+	}
+	if err := applyForwardForeign(fcfg); err == nil {
+		t.Fatal("forward on an already-normal foreign must fail")
+	}
+
+	if err := applyForwardIran(cfg, "a"); err != nil || cfg.ForeignNodes[0].Reverse || cfg.ForeignNodes[0].ReverseListeners != nil {
+		t.Fatalf("hub forward: %v %+v", err, cfg.ForeignNodes[0])
+	}
+	if err := applyForwardIran(cfg, "a"); err == nil {
+		t.Fatal("forward on an already-normal node must fail")
+	}
+}
+
+func TestApplyReverseForeignRejectsNormalToken(t *testing.T) {
+	if _, _, err := applyReverseForeign(&config.AppConfig{Role: "foreign"}, "garbage", 0, false); err == nil {
+		t.Fatal("a non-token must be rejected")
+	}
+}

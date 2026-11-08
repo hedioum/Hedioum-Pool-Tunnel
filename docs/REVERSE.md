@@ -18,6 +18,11 @@ reverse:             hub ◀──dials── foreign          hub opens streams
 
 ## Switching an existing pair
 
+Everything below is also available from the interactive menu (`hedioum-tunnel`): on the
+hub, **Reverse Tunnel: Switch a Node Normal <-> Reverse** (pick the node, review or edit
+the listener ports, and it prints the token for the foreign); on the foreign,
+**Reverse Mode: Dial the Hub** (paste the token). The commands:
+
 On the **hub** (flips the node and prints the command for the foreign):
 
 ```
@@ -52,8 +57,9 @@ hedioum-tunnel reverse-foreign --forward                # on the foreign
   normally taken on the hub. Any TLS/STARTTLS mimic (`tls`, `https-alt`, `smtps`, `imaps`,
   `smtp`, `imap`, `cpanel`, …) works. Unauthorized probes on a hub listener get the same
   decoy a probe on a foreign listener gets. By default the listeners use the node's
-  current endpoint ports; pass `--ports` if one is already in use on the hub (two reverse
-  nodes on one hub need distinct ports).
+  current endpoint ports; a port that is already taken on the hub (another service, or
+  another reverse node) is replaced by a free one automatically and reported. Pass
+  `--ports` to choose them yourself (an explicit port that is taken is an error).
 - **Certificate.** Self-signed by default. Set `domain` (and optionally `acme_email`) in
   the hub config to serve a real Let's Encrypt certificate, as the foreign does.
 - **Authentication.** Unchanged and mutual: the foreign proves the token to the hub and the
