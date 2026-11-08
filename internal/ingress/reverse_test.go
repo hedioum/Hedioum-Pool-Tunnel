@@ -186,3 +186,92 @@ func TestReverseListenerCertMatchesSNIAndDecoyStyle(t *testing.T) {
 		t.Fatalf("fallback must be the hub's decoy, got %q", got)
 	}
 }
+
+// proxyRelay accepts connections, dials the hub, prepends a PROXY v1 header like a front
+// proxy with `proxy_protocol on`, and pipes both ways. Returns the relay's port.
+func proxyRelay(t *testing.T, hubPort int, withHeader bool) int {
+	t.Helper()
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { l.Close() })
+	go func() {
+		for {
+			c, err := l.Accept()
+			if err != nil {
+				return
+			}
+			go func(c net.Conn) {
+				u, err := net.Dial("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(hubPort)))
+				if err != nil {
+					c.Close()
+					return
+				}
+				if withHeader {
+					io.WriteString(u, "PROXY TCP4 203.0.113.9 198.51.100.1 40000 443\r\n")
+				}
+				go func() { io.Copy(u, c); u.Close() }()
+				io.Copy(c, u)
+				c.Close()
+			}(c)
+		}
+	}()
+	return l.Addr().(*net.TCPAddr).Port
+}
+
+func startProxiedHub(t *testing.T, alias string, proxyProtocol bool) (*pool.HubManager, int) {
+	t.Helper()
+	old := reverseCertDir
+	reverseCertDir = t.TempDir()
+	t.Cleanup(func() { reverseCertDir = old })
+	port := freePort(t)
+	node := config.ForeignNode{
+		Alias: alias, AuthToken: reverseTestToken, Reverse: true,
+		ReverseBind: "127.0.0.1", ReverseProxyProtocol: proxyProtocol,
+		ReverseListeners: []config.MimicListener{{Type: "tls", Port: port}},
+		MinConnections:   1, MaxConnections: 3, BandwidthLimitMbps: 100, BandwidthJitterMbps: 5,
+	}
+	cfg := &config.AppConfig{Role: "iran", ForeignNodes: []config.ForeignNode{node}}
+	hm := pool.NewHubManager()
+	hm.RegisterReverseNode(node)
+	startReverseListeners(cfg, hm)
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		c, err := net.DialTimeout("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)), 200*time.Millisecond)
+		if err == nil {
+			c.Close()
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("listener did not come up: %v", err)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	return hm, port
+}
+
+// Behind a front proxy: the foreign dials the proxy's port, the proxy prepends the PROXY
+// header and forwards to the loopback-bound listener, and the pipes are adopted.
+func TestReverseBehindFrontProxy(t *testing.T) {
+	hm, hubPort := startProxiedHub(t, "proxied", true)
+	startReverseForeign(proxyRelay(t, hubPort, true), reverseTestToken, 3)
+	waitActive(t, hm, "proxied", 3)
+}
+
+// A listener that requires the PROXY protocol drops anything that skipped the proxy.
+func TestReverseProxyProtocolDropsDirectConnections(t *testing.T) {
+	hm, hubPort := startProxiedHub(t, "strict", true)
+	startReverseForeign(hubPort, reverseTestToken, 2) // straight to the listener, no header
+	time.Sleep(4 * time.Second)
+	if st := hm.GetStats("strict"); st.ActiveConns != 0 {
+		t.Fatalf("connections without a PROXY header must be dropped: %+v", st)
+	}
+}
+
+// Without PROXY protocol configured, a proxy that sends none works as before.
+func TestReverseBehindPlainTCPProxy(t *testing.T) {
+	hm, hubPort := startProxiedHub(t, "plain", false)
+	startReverseForeign(proxyRelay(t, hubPort, false), reverseTestToken, 3)
+	waitActive(t, hm, "plain", 3)
+}

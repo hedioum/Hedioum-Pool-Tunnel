@@ -65,13 +65,27 @@ func parsePortOverrides(spec string) (map[string]int, error) {
 	return out, nil
 }
 
+// isLoopbackBind reports whether a listener bind address is loopback-only.
+func isLoopbackBind(addr string) bool {
+	ip := net.ParseIP(addr)
+	return ip != nil && ip.IsLoopback()
+}
+
+// validBind accepts "" (all interfaces) or an IP literal.
+func validBind(addr string) error {
+	if addr == "" || net.ParseIP(addr) != nil {
+		return nil
+	}
+	return fmt.Errorf("%q is not an IP address", addr)
+}
+
 // reverseFirewallPorts lists the public ports a hub must open for its reverse nodes.
 func reverseFirewallPorts(cfg *config.AppConfig) []int {
 	seen := map[int]bool{}
 	var ports []int
 	for _, n := range cfg.ForeignNodes {
-		if !n.Reverse {
-			continue
+		if !n.Reverse || isLoopbackBind(n.ReverseBind) {
+			continue // not reachable from outside: nothing to open (a front proxy owns the public port)
 		}
 		for _, ml := range n.ReverseListeners {
 			if ml.Port != 0 && !seen[ml.Port] {
@@ -101,10 +115,12 @@ var portInUse = func(p int) bool {
 
 // reversePlan is what flipping a node to reverse mode will do.
 type reversePlan struct {
-	Listeners []config.MimicListener
-	Endpoints map[string]int // type -> port, as embedded in the pairing token
-	SNI       string
-	Moved     map[string]int // type -> port it would normally use but was taken (auto-moved)
+	Listeners  []config.MimicListener
+	Endpoints  map[string]int // type -> port, as embedded in the pairing token
+	SNI        string
+	Moved      map[string]int // type -> port it would normally use but was taken (auto-moved)
+	Advertised map[string]int // type -> port the foreign is told to dial (differs behind a front proxy)
+	Warnings   []string
 }
 
 func findNode(cfg *config.AppConfig, alias string) *config.ForeignNode {
@@ -236,15 +252,22 @@ func resolveHubIP(given string) (string, error) {
 	return ip, nil
 }
 
-// reverseOpts are the camouflage settings of a reverse node that the operator can set
-// to mirror what the foreign wears. Empty values keep the node's current ones.
+// reverseOpts are the camouflage and front-proxy settings of a reverse node that the
+// operator can set. Zero values keep the node's current ones.
 type reverseOpts struct {
 	SNI   string // TLS SNI the foreign sends and the hub's certificate is issued for
 	Decoy string // decoy persona for unauthorized probes: apache | directadmin
 	// Advertise overrides the port the foreign is told to dial for a mimic type, when it
-	// differs from the port the hub listens on (e.g. a front proxy owns :443 and forwards
-	// by SNI to the listener). Only the token changes; the listeners stay as planned.
-	Advertise map[string]int
+	// differs from the port the hub listens on (a front proxy owns :443 and forwards by
+	// SNI to the listener). Only advertised types get a listener and a token endpoint,
+	// since one SNI can be routed to one listener. AdvertiseSet distinguishes "not
+	// given" (keep the node's) from "given empty" (clear).
+	Advertise    map[string]int
+	AdvertiseSet bool
+	// Bind is the listener bind address ("127.0.0.1" behind a front proxy); nil keeps
+	// the node's. ProxyProtocol requires a PROXY header from the front proxy; nil keeps.
+	Bind          *string
+	ProxyProtocol *bool
 }
 
 func validDecoyStyle(s string) error {
@@ -272,23 +295,79 @@ func applyReverseIran(cfg *config.AppConfig, alias string, overrides map[string]
 	if err != nil {
 		return reversePlan{}, "", err
 	}
+	adv := node.ReverseAdvertise
+	if opts.AdvertiseSet {
+		adv = opts.Advertise
+	}
+	if opts.Bind != nil {
+		if err := validBind(*opts.Bind); err != nil {
+			return reversePlan{}, "", fmt.Errorf("--bind: %v", err)
+		}
+	}
+
 	advertised := map[string]int{}
-	for ty, p := range plan.Endpoints {
-		advertised[ty] = p
-	}
-	for ty, p := range opts.Advertise {
-		if _, ok := plan.Endpoints[ty]; !ok {
-			return reversePlan{}, "", fmt.Errorf("--advertise-ports %s: the node has no reverse listener of that type", ty)
+	if len(adv) == 0 {
+		for ty, p := range plan.Endpoints {
+			advertised[ty] = p
 		}
-		if err := validPort(p); err != nil {
-			return reversePlan{}, "", fmt.Errorf("--advertise-ports %s: %v", ty, err)
+	} else {
+		// Front-proxy mode: only the advertised types are served, each on its own public
+		// port (a front proxy routes one SNI to one listener).
+		seenPort := map[int]string{}
+		var keep []config.MimicListener
+		for _, l := range plan.Listeners {
+			p, ok := adv[l.Type]
+			if !ok {
+				continue
+			}
+			if err := validPort(p); err != nil {
+				return reversePlan{}, "", fmt.Errorf("--advertise-ports %s: %v", l.Type, err)
+			}
+			if other, dup := seenPort[p]; dup {
+				return reversePlan{}, "", fmt.Errorf("--advertise-ports: %s and %s both use port %d, but a front proxy routes one SNI to one listener; advertise a single type per port", other, l.Type, p)
+			}
+			seenPort[p] = l.Type
+			keep = append(keep, l)
+			advertised[l.Type] = p
 		}
-		advertised[ty] = p
+		for ty := range adv {
+			if _, ok := plan.Endpoints[ty]; !ok {
+				return reversePlan{}, "", fmt.Errorf("--advertise-ports %s: the node has no reverse listener of that type", ty)
+			}
+		}
+		plan.Listeners = keep
+		eps := map[string]int{}
+		for _, l := range keep {
+			eps[l.Type] = l.Port
+		}
+		plan.Endpoints = eps
 	}
+	plan.Advertised = advertised
+
 	node.Reverse = true
 	node.ReverseListeners = plan.Listeners
 	if opts.Decoy != "" {
 		node.ReverseDecoyStyle = opts.Decoy
+	}
+	if opts.Bind != nil {
+		node.ReverseBind = *opts.Bind
+	}
+	if opts.ProxyProtocol != nil {
+		node.ReverseProxyProtocol = *opts.ProxyProtocol
+	}
+	if len(adv) == 0 {
+		node.ReverseAdvertise = nil
+	} else {
+		node.ReverseAdvertise = map[string]int{}
+		for ty, p := range advertised {
+			node.ReverseAdvertise[ty] = p
+		}
+	}
+	if node.ReverseProxyProtocol && !isLoopbackBind(node.ReverseBind) {
+		plan.Warnings = append(plan.Warnings, "PROXY protocol is required but the listeners are not bound to a loopback address: anything reaching them directly is dropped, so also use --bind 127.0.0.1")
+	}
+	if len(adv) > 0 && !isLoopbackBind(node.ReverseBind) {
+		plan.Warnings = append(plan.Warnings, "a front proxy is in use but the listeners are still reachable directly; --bind 127.0.0.1 keeps them behind the proxy")
 	}
 	tok := pairing.Encode(pairing.Token{ExitIP: ip, AuthKey: node.AuthToken, SNI: plan.SNI, Endpoints: advertised, Reverse: true})
 	return plan, tok, nil
@@ -309,6 +388,9 @@ func applyForwardIran(cfg *config.AppConfig, alias string) error {
 	node.Reverse = false
 	node.ReverseListeners = nil
 	node.ReverseDecoyStyle = ""
+	node.ReverseBind = ""
+	node.ReverseProxyProtocol = false
+	node.ReverseAdvertise = nil
 	return nil
 }
 
@@ -377,6 +459,14 @@ func printReversePlan(alias string, plan reversePlan) {
 	if plan.SNI != "" {
 		color.Green("    SNI: %s", plan.SNI)
 	}
+	for _, l := range plan.Listeners {
+		if p, ok := plan.Advertised[l.Type]; ok && p != l.Port {
+			color.Green("    %s: the foreign dials port %d (your front proxy forwards it to :%d)", l.Type, p, l.Port)
+		}
+	}
+	for _, w := range plan.Warnings {
+		color.Yellow("    [!] %s", w)
+	}
 	color.Yellow("    These ports must be reachable from the foreign server (open them in any")
 	color.Yellow("    provider/network firewall; the host firewall is handled on start).")
 }
@@ -389,7 +479,9 @@ func cmdReverseIran(args []string) {
 	portsSpec := fs.String("ports", "", "listener ports as TYPE=PORT,... (default: the node's endpoint ports; a port taken on this host is replaced by a free one)")
 	publicIP := fs.String("public-ip", "", "this hub's public IP to embed in the token (auto-detected if empty)")
 	sni := fs.String("sni", "", "TLS SNI the foreign sends and the hub's certificate is issued for (default: the node's current SNI)")
-	advertise := fs.String("advertise-ports", "", "ports the foreign dials, as TYPE=PORT,... when a front proxy (nginx stream) forwards them to the listener ports")
+	advertise := fs.String("advertise-ports", "", "ports the foreign dials, as TYPE=PORT,... when a front proxy (nginx stream) forwards them to the listener ports (remembered; \"\" clears)")
+	bind := fs.String("bind", "", "address the listeners bind to (127.0.0.1 behind a front proxy; \"\" = all interfaces; remembered)")
+	proxyProto := fs.Bool("proxy-protocol", false, "require a PROXY protocol header from the front proxy (nginx proxy_protocol on / HAProxy send-proxy; remembered)")
 	decoy := fs.String("decoy-style", "", "decoy shown to unauthorized probes: apache|directadmin (default: the node's, else the hub's)")
 	forward := fs.Bool("forward", false, "flip the node back to the normal mode (the hub dials the foreign)")
 	_ = fs.Parse(args)
@@ -424,7 +516,18 @@ func cmdReverseIran(args []string) {
 	if err != nil {
 		fail("--advertise-ports: %v", err)
 	}
-	plan, tok, err := applyReverseIran(cfg, *alias, overrides, *publicIP, reverseOpts{SNI: *sni, Decoy: *decoy, Advertise: adv})
+	opts := reverseOpts{SNI: *sni, Decoy: *decoy, Advertise: adv}
+	fs.Visit(func(f *flag.Flag) { // only flags that were actually given change the node
+		switch f.Name {
+		case "advertise-ports":
+			opts.AdvertiseSet = true
+		case "bind":
+			opts.Bind = bind
+		case "proxy-protocol":
+			opts.ProxyProtocol = proxyProto
+		}
+	})
+	plan, tok, err := applyReverseIran(cfg, *alias, overrides, *publicIP, opts)
 	if err != nil {
 		fail("%v", err)
 	}

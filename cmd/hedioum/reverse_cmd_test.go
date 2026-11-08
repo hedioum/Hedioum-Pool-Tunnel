@@ -2,6 +2,7 @@ package main
 
 import (
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/hedioum/Hedioum-Pool-Tunnel/config"
@@ -217,7 +218,7 @@ func TestApplyReverseAdvertisePorts(t *testing.T) {
 	fakePortsInUse(t)
 	n := planTestNode("a", config.Endpoint{Target: "1.2.3.4:8443", Mimic: "https-alt"})
 	cfg := &config.AppConfig{Role: "iran", ForeignNodes: []config.ForeignNode{n}}
-	plan, tok, err := applyReverseIran(cfg, "a", nil, "198.51.100.7", reverseOpts{Advertise: map[string]int{"https-alt": 443}})
+	plan, tok, err := applyReverseIran(cfg, "a", nil, "198.51.100.7", reverseOpts{Advertise: map[string]int{"https-alt": 443}, AdvertiseSet: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -231,7 +232,136 @@ func TestApplyReverseAdvertisePorts(t *testing.T) {
 	if got := fcfg.ReverseTargets[0].Target; got != "198.51.100.7:443" {
 		t.Fatalf("the foreign must dial the advertised port, got %s", got)
 	}
-	if _, _, err := applyReverseIran(cfg, "a", nil, "198.51.100.7", reverseOpts{Advertise: map[string]int{"tls": 443}}); err == nil {
+	if _, _, err := applyReverseIran(cfg, "a", nil, "198.51.100.7", reverseOpts{Advertise: map[string]int{"tls": 443}, AdvertiseSet: true}); err == nil {
 		t.Fatal("advertising a type the node has no listener for must fail")
+	}
+}
+
+func sp(s string) *string { return &s }
+func bp(b bool) *bool     { return &b }
+
+// Front-proxy settings are remembered across re-runs, only advertised types are served,
+// and going back to the normal mode clears them.
+func TestFrontProxySettingsPersist(t *testing.T) {
+	fakePortsInUse(t)
+	n := planTestNode("a",
+		config.Endpoint{Target: "1.2.3.4:443", Mimic: "tls", ServerName: "i3.example.test"},
+		config.Endpoint{Target: "1.2.3.4:8443", Mimic: "https-alt", ServerName: "i3.example.test"},
+	)
+	cfg := &config.AppConfig{Role: "iran", ForeignNodes: []config.ForeignNode{n}}
+
+	plan, tok, err := applyReverseIran(cfg, "a", map[string]int{"tls": 9443, "https-alt": 8443}, "198.51.100.7", reverseOpts{
+		Advertise: map[string]int{"https-alt": 443}, AdvertiseSet: true, Bind: sp("127.0.0.1"), ProxyProtocol: bp(true),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	node := cfg.ForeignNodes[0]
+	if len(plan.Listeners) != 1 || plan.Listeners[0].Type != "https-alt" {
+		t.Fatalf("only the advertised type is served behind a proxy: %+v", plan.Listeners)
+	}
+	if node.ReverseBind != "127.0.0.1" || !node.ReverseProxyProtocol || node.ReverseAdvertise["https-alt"] != 443 {
+		t.Fatalf("settings not stored: %+v", node)
+	}
+	fcfg := &config.AppConfig{Role: "foreign"}
+	if n, _, err := applyReverseForeign(fcfg, tok, 0, false); err != nil || n != 1 || fcfg.ReverseTargets[0].Target != "198.51.100.7:443" {
+		t.Fatalf("foreign must dial the advertised port only: %v %+v", err, fcfg.ReverseTargets)
+	}
+
+	// Re-run without the flags: everything is kept.
+	if _, _, err := applyReverseIran(cfg, "a", map[string]int{"https-alt": 8443}, "198.51.100.7", reverseOpts{SNI: "i3.example.test"}); err != nil {
+		t.Fatal(err)
+	}
+	node = cfg.ForeignNodes[0]
+	if node.ReverseBind != "127.0.0.1" || !node.ReverseProxyProtocol || node.ReverseAdvertise["https-alt"] != 443 {
+		t.Fatalf("a re-run without flags must keep the front-proxy settings: %+v", node)
+	}
+
+	// Explicit clear.
+	if _, _, err := applyReverseIran(cfg, "a", nil, "198.51.100.7", reverseOpts{AdvertiseSet: true, Bind: sp(""), ProxyProtocol: bp(false)}); err != nil {
+		t.Fatal(err)
+	}
+	node = cfg.ForeignNodes[0]
+	if node.ReverseBind != "" || node.ReverseProxyProtocol || len(node.ReverseAdvertise) != 0 {
+		t.Fatalf("explicit clear failed: %+v", node)
+	}
+
+	// Forward clears whatever is left.
+	cfg.ForeignNodes[0].ReverseBind, cfg.ForeignNodes[0].ReverseProxyProtocol = "127.0.0.1", true
+	cfg.ForeignNodes[0].ReverseAdvertise = map[string]int{"https-alt": 443}
+	if err := applyForwardIran(cfg, "a"); err != nil {
+		t.Fatal(err)
+	}
+	node = cfg.ForeignNodes[0]
+	if node.ReverseBind != "" || node.ReverseProxyProtocol || node.ReverseAdvertise != nil {
+		t.Fatalf("forward must clear front-proxy settings: %+v", node)
+	}
+}
+
+func TestAdvertiseSamePortTwiceIsRejected(t *testing.T) {
+	fakePortsInUse(t)
+	n := planTestNode("a",
+		config.Endpoint{Target: "1.2.3.4:443", Mimic: "tls"},
+		config.Endpoint{Target: "1.2.3.4:8443", Mimic: "https-alt"},
+	)
+	cfg := &config.AppConfig{Role: "iran", ForeignNodes: []config.ForeignNode{n}}
+	_, _, err := applyReverseIran(cfg, "a", map[string]int{"tls": 9443, "https-alt": 8443}, "198.51.100.7", reverseOpts{
+		Advertise: map[string]int{"tls": 443, "https-alt": 443}, AdvertiseSet: true,
+	})
+	if err == nil {
+		t.Fatal("two types on one public port cannot be told apart by a proxy and must be rejected")
+	}
+	if _, _, err := applyReverseIran(cfg, "a", nil, "198.51.100.7", reverseOpts{Bind: sp("not-an-ip")}); err == nil {
+		t.Fatal("an invalid bind address must be rejected")
+	}
+}
+
+// A loopback-bound node is not reachable from outside, so the host firewall opens nothing for it.
+func TestFirewallSkipsLoopbackBoundNodes(t *testing.T) {
+	cfg := &config.AppConfig{ForeignNodes: []config.ForeignNode{
+		{Alias: "proxied", Reverse: true, ReverseBind: "127.0.0.1", ReverseListeners: []config.MimicListener{{Type: "https-alt", Port: 8443}}},
+		{Alias: "open", Reverse: true, ReverseListeners: []config.MimicListener{{Type: "tls", Port: 2053}}},
+	}}
+	if got := reverseFirewallPorts(cfg); !reflect.DeepEqual(got, []int{2053}) {
+		t.Fatalf("got %v, want only the publicly bound port", got)
+	}
+}
+
+func TestFrontProxySnippets(t *testing.T) {
+	node := config.ForeignNode{
+		Alias: "a", Reverse: true, ReverseBind: "127.0.0.1", ReverseProxyProtocol: true,
+		ReverseListeners: []config.MimicListener{{Type: "https-alt", Port: 8443, ServerName: "i3.example.test"}},
+	}
+	ng, err := nginxSnippet(node, 443)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"i3.example.test  127.0.0.1:8443;", "proxy_protocol on;", "listen 443;"} {
+		if !strings.Contains(ng, want) {
+			t.Errorf("nginx snippet is missing %q:\n%s", want, ng)
+		}
+	}
+	hp, err := haproxySnippet(node, 443)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"req_ssl_sni -i i3.example.test", "server hub 127.0.0.1:8443 send-proxy"} {
+		if !strings.Contains(hp, want) {
+			t.Errorf("haproxy snippet is missing %q:\n%s", want, hp)
+		}
+	}
+	node.ReverseProxyProtocol = false
+	if ng, _ = nginxSnippet(node, 443); strings.Contains(ng, "        proxy_protocol on;") {
+		t.Error("no PROXY protocol: the minimal stream server must not enable it")
+	}
+	if hp, _ = haproxySnippet(node, 443); strings.Contains(hp, "send-proxy") {
+		t.Error("no PROXY protocol: HAProxy must not send it")
+	}
+	if _, err := nginxSnippet(config.ForeignNode{Alias: "x"}, 443); err == nil {
+		t.Error("a node that is not reverse has no front-proxy config")
+	}
+	node.ReverseListeners[0].ServerName = ""
+	if _, err := nginxSnippet(node, 443); err == nil {
+		t.Error("without an SNI the proxy cannot recognise the tunnel")
 	}
 }
