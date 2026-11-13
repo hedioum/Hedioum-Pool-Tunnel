@@ -99,6 +99,36 @@ func runReverseIranMenu(cfg *config.AppConfig) {
 		}
 	}
 
+	if len(node.ReverseListeners) > 0 {
+		var quick string
+		_ = survey.AskOne(&survey.Select{
+			Message: fmt.Sprintf("Node %q was in reverse mode before. What now?", alias),
+			Options: []string{
+				"Switch to reverse again with the saved settings (one step)",
+				"Reconfigure (ports, SNI, front proxy)",
+				"Cancel",
+			},
+		}, &quick)
+		switch {
+		case strings.HasPrefix(quick, "Switch to reverse"):
+			opts := reverseOpts{ShareWith: resumeShareWith(cfg, alias)}
+			plan, tok, err := applyReverseIran(cfg, alias, nil, "", opts)
+			if err != nil {
+				color.Red("[x] %v", err)
+				return
+			}
+			printReversePlan(alias, plan)
+			commitReverse(cfg)
+			color.HiGreen("\n━━━ On the foreign server ━━━")
+			color.White("If it still has its reverse settings: hedioum-tunnel reverse-foreign --resume")
+			color.White("Otherwise: hedioum-tunnel reverse-foreign --token %s", tok)
+			return
+		case strings.HasPrefix(quick, "Reconfigure"):
+		default:
+			return
+		}
+	}
+
 	color.HiCyan("\nReverse mode: %q will keep its token and settings, but the foreign dials this hub.", alias)
 	var overrides map[string]int
 	var opts reverseOpts
@@ -247,6 +277,22 @@ func runSharedAuthMenu(cfg *config.AppConfig) {
 // runReverseForeignMenu switches the foreign to dial the hub, or back.
 func runReverseForeignMenu(cfg *config.AppConfig) {
 	inReverse := len(cfg.ReverseTargets) > 0
+	if !inReverse && cfg.ReverseSaved != nil && (len(cfg.ReverseSaved.Targets) > 0 || len(cfg.ReverseSaved.Hubs) > 0) {
+		var resume bool
+		_ = survey.AskOne(&survey.Confirm{
+			Message: "This foreign was in reverse mode before. Switch back to it with the saved settings (no token)?",
+			Default: true,
+		}, &resume)
+		if resume {
+			if err := applyResumeForeign(cfg); err != nil {
+				color.Red("[x] %v", err)
+				return
+			}
+			commitReverse(cfg)
+			color.Yellow("    Make sure the hub node is in reverse mode too.")
+			return
+		}
+	}
 	if inReverse {
 		color.HiCyan("\nThis foreign is in REVERSE mode (it dials the hub, %d endpoint(s)).", len(cfg.ReverseTargets))
 		var choice string

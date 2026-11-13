@@ -150,7 +150,7 @@ func planReverseFor(cfg *config.AppConfig, node *config.ForeignNode, overrides m
 	switch {
 	case allTypes:
 		types = nodeTypes
-	case node.Reverse && len(node.ReverseListeners) > 0:
+	case len(node.ReverseListeners) > 0:
 		for _, l := range node.ReverseListeners {
 			types = append(types, l.Type)
 		}
@@ -171,6 +171,9 @@ func planReverseFor(cfg *config.AppConfig, node *config.ForeignNode, overrides m
 	types = append(types, extra...)
 
 	ports := currentNodePorts(*node)
+	for _, l := range node.ReverseListeners { // remembered listener ports win over the endpoint ports
+		ports[l.Type] = l.Port
+	}
 	usedByOthers := map[int]string{}
 	for _, n := range cfg.ForeignNodes {
 		if n.Alias == node.Alias || !n.Reverse {
@@ -197,6 +200,9 @@ func planReverseFor(cfg *config.AppConfig, node *config.ForeignNode, overrides m
 		return !own[p] && portInUse(p)
 	}
 
+	if sni == "" && len(node.ReverseListeners) > 0 {
+		sni = node.ReverseListeners[0].ServerName
+	}
 	if sni == "" {
 		sni = firstEndpointSNI(*node)
 	}
@@ -327,12 +333,14 @@ func applyReverseIran(cfg *config.AppConfig, alias string, overrides map[string]
 			plan.SNI = l.ServerName
 		}
 		adv = src.ReverseAdvertise
+		node.ReverseShareWith = src.Alias
 		// The sharing node must run on the same socket settings as the one it joins.
 		bind, proxy := src.ReverseBind, src.ReverseProxyProtocol
 		opts.Bind, opts.ProxyProtocol = &bind, &proxy
 		plan.Warnings = append(plan.Warnings, fmt.Sprintf("this node shares the listener of %q: the hub tells the two foreign servers apart by token", src.Alias))
 	} else {
 		var err error
+		node.ReverseShareWith = ""
 		plan, err = planReverseFor(cfg, node, overrides, opts.SNI, opts.AllTypes)
 		if err != nil {
 			return reversePlan{}, "", err
@@ -533,13 +541,23 @@ func applyForwardIran(cfg *config.AppConfig, alias string) error {
 	if len(node.Endpoints) == 0 {
 		return fmt.Errorf("node %q has no endpoints to dial; re-add it with add-node", alias)
 	}
+	// Only the switch is cleared: listeners, bind, PROXY protocol, SNI and advertised
+	// ports are remembered, so switching to reverse again needs no reconfiguration.
 	node.Reverse = false
-	node.ReverseListeners = nil
-	node.ReverseDecoyStyle = ""
-	node.ReverseBind = ""
-	node.ReverseProxyProtocol = false
-	node.ReverseAdvertise = nil
 	return nil
+}
+
+// resumeShareWith returns the node whose listener a switched-back node joined before,
+// if that node is still a reverse node and sharing is still allowed; else "".
+func resumeShareWith(cfg *config.AppConfig, alias string) string {
+	node := findNode(cfg, alias)
+	if node == nil || node.ReverseShareWith == "" || !cfg.SharedReverseAuth {
+		return ""
+	}
+	if src := findNode(cfg, node.ReverseShareWith); src == nil || !src.Reverse || len(src.ReverseListeners) == 0 {
+		return ""
+	}
+	return node.ReverseShareWith
 }
 
 // applyReverseForeign switches a foreign config to dial the hub from a reverse
@@ -569,6 +587,7 @@ func applyReverseForeign(cfg *config.AppConfig, token string, conns int, keep bo
 	cfg.ReverseTargets = targets
 	cfg.ReverseConns = conns // 0 = default (applied on load)
 	cfg.ReverseOnly = !keep
+	cfg.ReverseSaved = nil
 	return len(targets), keyChanged, nil
 }
 
@@ -595,10 +614,29 @@ func applyForwardForeign(cfg *config.AppConfig) error {
 	if len(cfg.ReverseTargets) == 0 && len(cfg.ReverseHubs) == 0 && !cfg.ReverseOnly {
 		return fmt.Errorf("this foreign is already in the normal (hub-dials-foreign) mode")
 	}
+	cfg.ReverseSaved = &config.ReverseSaved{Hubs: cfg.ReverseHubs, Targets: cfg.ReverseTargets, Conns: cfg.ReverseConns, Only: cfg.ReverseOnly}
 	cfg.ReverseHubs = nil
 	cfg.ReverseTargets = nil
 	cfg.ReverseConns = 0
 	cfg.ReverseOnly = false
+	return nil
+}
+
+// applyResumeForeign switches a foreign back to the reverse mode it had before
+// applyForwardForeign, with the same hubs, pipes and listener choice: no token needed.
+func applyResumeForeign(cfg *config.AppConfig) error {
+	if len(cfg.ReverseTargets) > 0 || len(cfg.ReverseHubs) > 0 {
+		return fmt.Errorf("this foreign is already in reverse mode")
+	}
+	s := cfg.ReverseSaved
+	if s == nil || (len(s.Targets) == 0 && len(s.Hubs) == 0) {
+		return fmt.Errorf("no saved reverse settings; use `reverse-foreign --token ...` with a token from the hub")
+	}
+	cfg.ReverseHubs = s.Hubs
+	cfg.ReverseTargets = s.Targets
+	cfg.ReverseConns = s.Conns
+	cfg.ReverseOnly = s.Only
+	cfg.ReverseSaved = nil
 	return nil
 }
 
@@ -644,7 +682,8 @@ func cmdReverseIran(args []string) {
 	shareWith := fs.String("share-with", "", "advanced: join this reverse node's listener (same port/SNI) instead of getting its own; needs `reverse-shared-auth --on`")
 	decoy := fs.String("decoy-style", "", "decoy shown to unauthorized probes: apache|directadmin (default: the node's, else the hub's)")
 	allMimics := fs.Bool("all-mimics", false, "open a listener for every mimic type of the node (default: one TLS listener; name extra types in --ports)")
-	forward := fs.Bool("forward", false, "flip the node back to the normal mode (the hub dials the foreign)")
+	forward := fs.Bool("forward", false, "flip the node back to the normal mode (the hub dials the foreign); its reverse settings are remembered")
+	resume := fs.Bool("resume", false, "flip the node back to reverse mode with the settings it had (ports, SNI, front proxy); no other flag needed")
 	_ = fs.Parse(args)
 
 	if *alias == "" {
@@ -663,12 +702,25 @@ func cmdReverseIran(args []string) {
 			fail("failed to save config: %v", err)
 		}
 		color.Green("[✓] Node %q is back to the normal mode (the hub dials the foreign).", *alias)
+		color.Yellow("    Its reverse settings are remembered: to switch back run reverse-iran --alias %s --resume", *alias)
 		color.Yellow("    Also run on the foreign: hedioum-tunnel reverse-foreign --forward")
 		reconcileUnit("iran")
 		restartDaemon()
 		return
 	}
 
+	if *resume {
+		node := findNode(cfg, *alias)
+		if node == nil {
+			fail("no node with alias %q", *alias)
+		}
+		if node.Reverse {
+			fail("node %q is already in reverse mode", *alias)
+		}
+		if len(node.ReverseListeners) == 0 {
+			fail("node %q has no saved reverse settings; run reverse-iran --alias %s once without --resume", *alias, *alias)
+		}
+	}
 	overrides, err := parsePortOverrides(*portsSpec)
 	if err != nil {
 		fail("--ports: %v", err)
@@ -678,6 +730,9 @@ func cmdReverseIran(args []string) {
 		fail("--advertise-ports: %v", err)
 	}
 	opts := reverseOpts{SNI: *sni, Decoy: *decoy, Advertise: adv, ShareWith: *shareWith, AllTypes: *allMimics}
+	if *resume {
+		opts.ShareWith = resumeShareWith(cfg, *alias)
+	}
 	fs.Visit(func(f *flag.Flag) { // only flags that were actually given change the node
 		switch f.Name {
 		case "advertise-ports":
@@ -711,12 +766,27 @@ func cmdReverseForeign(args []string) {
 	token := fs.String("token", "", "reverse pairing token printed by `reverse-iran` on the hub")
 	conns := fs.Int("conns", 0, "pipes to keep open to the hub (default 12; raise for more throughput)")
 	keep := fs.Bool("keep-listeners", false, "also keep the normal inbound listeners (default: dial-out only, no open ports)")
-	forward := fs.Bool("forward", false, "restore the normal mode (the hub dials this foreign)")
+	forward := fs.Bool("forward", false, "restore the normal mode (the hub dials this foreign); the reverse settings are remembered")
+	resume := fs.Bool("resume", false, "go back to reverse mode with the hubs and pipes it had; no token needed")
 	_ = fs.Parse(args)
 
 	cfg, err := config.LoadConfig()
 	if err != nil || cfg.Role != "foreign" {
 		fail("no foreign config (run this on the foreign; setup-foreign first)")
+	}
+
+	if *resume {
+		if err := applyResumeForeign(cfg); err != nil {
+			fail("%v", err)
+		}
+		if err := config.SaveConfig(cfg); err != nil {
+			fail("failed to save config: %v", err)
+		}
+		color.Green("[✓] Reverse mode on again: dialing %d hub(s) with the saved settings.", len(cfg.EffectiveReverseHubs()))
+		color.Yellow("    Make sure the hub node is in reverse mode too: hedioum-tunnel reverse-iran --alias NAME --resume")
+		reconcileUnit("foreign")
+		restartDaemon()
+		return
 	}
 
 	if *forward {
@@ -727,6 +797,7 @@ func cmdReverseForeign(args []string) {
 			fail("failed to save config: %v", err)
 		}
 		color.Green("[✓] Back to the normal mode: this foreign listens for the hub again.")
+		color.Yellow("    The reverse settings are remembered: to switch back run reverse-foreign --resume")
 		color.Yellow("    Also run on the hub: hedioum-tunnel reverse-iran --alias NAME --forward")
 		reconcileUnit("foreign")
 		restartDaemon()

@@ -165,7 +165,7 @@ func TestApplyReverseIranAndForward(t *testing.T) {
 		t.Fatal("forward on an already-normal foreign must fail")
 	}
 
-	if err := applyForwardIran(cfg, "a"); err != nil || cfg.ForeignNodes[0].Reverse || cfg.ForeignNodes[0].ReverseListeners != nil {
+	if err := applyForwardIran(cfg, "a"); err != nil || cfg.ForeignNodes[0].Reverse || len(cfg.ForeignNodes[0].ReverseListeners) == 0 {
 		t.Fatalf("hub forward: %v %+v", err, cfg.ForeignNodes[0])
 	}
 	if err := applyForwardIran(cfg, "a"); err == nil {
@@ -209,8 +209,8 @@ func TestApplyReverseCarriesSNIAndDecoy(t *testing.T) {
 	if _, _, err := applyReverseIran(cfg, "a", nil, "198.51.100.7", reverseOpts{Decoy: "nginx"}); err == nil {
 		t.Fatal("an unknown decoy style must be rejected")
 	}
-	if err := applyForwardIran(cfg, "a"); err != nil || cfg.ForeignNodes[0].ReverseDecoyStyle != "" {
-		t.Fatalf("forward must clear the decoy: %v %q", err, cfg.ForeignNodes[0].ReverseDecoyStyle)
+	if err := applyForwardIran(cfg, "a"); err != nil || cfg.ForeignNodes[0].ReverseDecoyStyle != "directadmin" {
+		t.Fatalf("forward must remember the decoy: %v %q", err, cfg.ForeignNodes[0].ReverseDecoyStyle)
 	}
 }
 
@@ -320,15 +320,15 @@ func TestFrontProxySettingsPersist(t *testing.T) {
 		t.Fatalf("explicit clear failed: %+v", node)
 	}
 
-	// Forward clears whatever is left.
+	// Forward remembers the settings, so switching back is one step.
 	cfg.ForeignNodes[0].ReverseBind, cfg.ForeignNodes[0].ReverseProxyProtocol = "127.0.0.1", true
 	cfg.ForeignNodes[0].ReverseAdvertise = map[string]int{"https-alt": 443}
 	if err := applyForwardIran(cfg, "a"); err != nil {
 		t.Fatal(err)
 	}
 	node = cfg.ForeignNodes[0]
-	if node.ReverseBind != "" || node.ReverseProxyProtocol || node.ReverseAdvertise != nil {
-		t.Fatalf("forward must clear front-proxy settings: %+v", node)
+	if node.Reverse || node.ReverseBind != "127.0.0.1" || !node.ReverseProxyProtocol || node.ReverseAdvertise["https-alt"] != 443 {
+		t.Fatalf("forward must remember front-proxy settings: %+v", node)
 	}
 }
 
@@ -466,5 +466,65 @@ func TestShareWithRejectsBadSources(t *testing.T) {
 	}
 	if _, _, err := applyReverseIran(cfg, "b", nil, "198.51.100.7", reverseOpts{ShareWith: "a", SNI: "other.example.com"}); err == nil {
 		t.Error("a different SNI on a shared listener must fail")
+	}
+}
+
+// Switching a hub node back and forth keeps ports, SNI, bind and PROXY protocol, with no
+// flag given the second time.
+func TestHubNodeToggleKeepsSettings(t *testing.T) {
+	fakePortsInUse(t)
+	cfg := &config.AppConfig{Role: "iran", ForeignNodes: []config.ForeignNode{{
+		Alias: "a", AuthToken: "0123456789abcdef0123456789abcdef",
+		Endpoints: []config.Endpoint{{Target: "1.2.3.4:443", Mimic: "tls", ServerName: "i1.example.test"}},
+	}}}
+	bind, pp := "127.0.0.1", true
+	_, tok1, err := applyReverseIran(cfg, "a", map[string]int{"tls": 9553}, "198.51.100.7",
+		reverseOpts{Bind: &bind, ProxyProtocol: &pp, Advertise: map[string]int{"tls": 443}, AdvertiseSet: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := applyForwardIran(cfg, "a"); err != nil {
+		t.Fatal(err)
+	}
+	_, tok2, err := applyReverseIran(cfg, "a", nil, "198.51.100.7", reverseOpts{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	n := cfg.ForeignNodes[0]
+	if !n.Reverse || len(n.ReverseListeners) != 1 || n.ReverseListeners[0].Port != 9553 ||
+		n.ReverseListeners[0].ServerName != "i1.example.test" || n.ReverseBind != "127.0.0.1" || !n.ReverseProxyProtocol {
+		t.Fatalf("settings lost after toggling: %+v", n)
+	}
+	if tok1 != tok2 {
+		t.Fatal("the pairing token must be the same after toggling")
+	}
+}
+
+// The foreign keeps its hubs and pipe settings across forward/resume without a token.
+func TestForeignToggleResumes(t *testing.T) {
+	cfg := &config.AppConfig{Role: "foreign", AuthToken: "0123456789abcdef0123456789abcdef",
+		ReverseTargets: []config.Endpoint{{Target: "198.51.100.7:443", Mimic: "tls", ServerName: "i1.example.test"}},
+		ReverseConns:   20, ReverseOnly: true}
+	if err := applyResumeForeign(cfg); err == nil {
+		t.Fatal("resuming while in reverse mode must fail")
+	}
+	if err := applyForwardForeign(cfg); err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.ReverseTargets) != 0 || cfg.ReverseSaved == nil {
+		t.Fatalf("forward must park the settings: %+v", cfg)
+	}
+	if err := applyResumeForeign(cfg); err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.ReverseTargets) != 1 || cfg.ReverseConns != 20 || !cfg.ReverseOnly || cfg.ReverseSaved != nil {
+		t.Fatalf("resume must restore everything: %+v", cfg)
+	}
+	if err := applyForwardForeign(cfg); err != nil {
+		t.Fatal(err)
+	}
+	cfg.ReverseSaved = nil
+	if err := applyResumeForeign(cfg); err == nil {
+		t.Fatal("resume with nothing saved must say so")
 	}
 }

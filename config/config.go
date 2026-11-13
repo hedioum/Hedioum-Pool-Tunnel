@@ -81,6 +81,9 @@ type AppConfig struct {
 	// older binary still dials something sensible. Empty = the single hub described by
 	// ReverseTargets/ReverseConns (every config written before this field existed).
 	ReverseHubs []ReverseHub `json:"reverse_hubs,omitempty"`
+	// ReverseSaved holds the reverse settings of a foreign that was switched back to the
+	// normal mode, so one step (reverse-foreign --resume) restores them without a token.
+	ReverseSaved *ReverseSaved `json:"reverse_saved,omitempty"`
 
 	// Iran Node specific properties
 	ForeignNodes []ForeignNode `json:"foreign_nodes,omitempty"`
@@ -106,6 +109,14 @@ type ReverseHub struct {
 	AuthToken string `json:"auth_token,omitempty"`
 	MinConns  int    `json:"min_conns,omitempty"` // pipes always kept open (default 12)
 	MaxConns  int    `json:"max_conns,omitempty"` // upper bound under load (default = MinConns, i.e. fixed)
+}
+
+// ReverseSaved is the foreign-side reverse configuration remembered while in normal mode.
+type ReverseSaved struct {
+	Hubs    []ReverseHub `json:"hubs,omitempty"`
+	Targets []Endpoint   `json:"targets,omitempty"`
+	Conns   int          `json:"conns,omitempty"`
+	Only    bool         `json:"only,omitempty"`
 }
 
 // DefaultReverseConns is the pipe count of a reverse hub when none is set: 10 TCP + the
@@ -273,6 +284,12 @@ type ForeignNode struct {
 	// when it differs from the port the listener binds (a front proxy listens on 443 and
 	// forwards to the listener). It is remembered so re-printing the token keeps it.
 	ReverseAdvertise map[string]int `json:"reverse_advertise_ports,omitempty"`
+	// ReverseShareWith is the alias of the node whose listener this one joined (advanced
+	// shared listener), remembered so switching back to reverse rejoins it.
+	ReverseShareWith string `json:"reverse_share_with,omitempty"`
+	// The Reverse* fields above are KEPT when the node is switched back to the normal
+	// mode (only Reverse is cleared), so switching to reverse again is one step with the
+	// same ports, SNI, front-proxy and decoy settings.
 }
 
 // getConfigPath determines the storage destination for the configuration.
