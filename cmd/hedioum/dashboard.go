@@ -188,11 +188,12 @@ func runInteractiveDashboard(cfg *config.AppConfig) {
 		case strings.Contains(action, "Reverse Tunnel: Switch a Node"):
 			runReverseIranMenu(cfg)
 
-		case strings.Contains(action, "Advanced Settings (front proxy such as"):
-			runHubAdvancedMenu(cfg)
-
-		case strings.Contains(action, "Advanced Settings (front proxy, pairing"):
-			runForeignAdvancedMenu(cfg)
+		case strings.Contains(action, "Advanced Settings ("):
+			if cfg.Role == "iran" {
+				runHubAdvancedMenu(cfg)
+			} else {
+				runForeignAdvancedMenu(cfg)
+			}
 
 		case strings.Contains(action, "Front Proxy: share a port"):
 			runForeignFrontProxyMenu(cfg)
