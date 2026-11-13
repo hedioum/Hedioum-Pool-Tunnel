@@ -40,8 +40,7 @@ func runInteractiveDashboard(cfg *config.AppConfig) {
 				"8. Test Connection (full egress: exit IP, sites, DNS, TUN)",
 				"9. Check This Server's IP Reputation",
 				"10. Restart the Service (reset all pools)",
-				"11. Reverse Tunnel: Switch a Node Normal <-> Reverse",
-				"12. Advanced Settings (reverse ports/SNI/pipes, front proxy such as nginx on 443, shared listeners)",
+				"11. Advanced Settings (reverse mode on/off and settings, front proxy such as nginx on 443, shared listeners)",
 			)
 		} else {
 			options = append(options,
@@ -49,9 +48,7 @@ func runInteractiveDashboard(cfg *config.AppConfig) {
 				"4. Rotate Authentication Token",
 				"5. Check Egress IP Reputation",
 				"6. Restart the Service",
-				"7. Reverse Mode: Dial the Hub (when the hub can't reach this server)",
-				"8. Front Proxy: share a port such as 443 with nginx / HAProxy",
-				"9. Advanced Settings (front proxy and which mimics, pairing token, reverse hubs)",
+				"7. Advanced Settings (reverse mode on/off, front proxy such as nginx on 443, pairing token, hubs)",
 			)
 		}
 
@@ -207,21 +204,12 @@ func runInteractiveDashboard(cfg *config.AppConfig) {
 		case strings.Contains(action, "IP Reputation"):
 			cmdCheckIP(nil)
 
-		case strings.Contains(action, "Reverse Tunnel: Switch a Node"):
-			runReverseIranMenu(cfg)
-
 		case strings.Contains(action, "Advanced Settings ("):
 			if cfg.Role == "iran" {
 				runHubAdvancedMenu(cfg)
 			} else {
 				runForeignAdvancedMenu(cfg)
 			}
-
-		case strings.Contains(action, "Front Proxy: share a port"):
-			runForeignFrontProxyMenu(cfg)
-
-		case strings.Contains(action, "Reverse Mode: Dial the Hub"):
-			runReverseForeignMenu(cfg)
 
 		case strings.Contains(action, "Restart the Service"):
 			color.HiBlue("\n[*] Restarting hedioum.service (re-warms every pool)...")

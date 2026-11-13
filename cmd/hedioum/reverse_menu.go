@@ -260,7 +260,7 @@ func reverseNodeFlow(cfg *config.AppConfig, alias string, advanced bool) {
 	}
 	color.HiGreen("\n━━━ Run this on the foreign server now ━━━")
 	fmt.Printf("hedioum-tunnel reverse-foreign --token %s\n", tok)
-	color.Yellow("(or choose \"Reverse Mode\" in the foreign's menu and paste the token)")
+	color.Yellow("(or open Advanced settings > [Foreign side] Reverse mode on the foreign and paste the token)")
 }
 
 // reverseNodesOtherThan lists the reverse nodes a node could share a listener with.
