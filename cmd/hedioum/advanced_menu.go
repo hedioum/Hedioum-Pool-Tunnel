@@ -21,7 +21,7 @@ import (
 // changes. It returns the endpoint host for the confirmation message.
 func setNodeBehindProxy(node *config.ForeignNode, mimicType string, publicPort int, sni string) error {
 	if node.Reverse {
-		return fmt.Errorf("node %q is in reverse mode; use the Reverse Tunnel menu for its proxy settings", node.Alias)
+		return fmt.Errorf("node %q is in reverse mode; use Advanced settings > [Hub side] Reverse nodes for its proxy settings", node.Alias)
 	}
 	if mimicType == "ssh" {
 		return fmt.Errorf("the ssh mimic cannot be routed by SNI")
@@ -91,15 +91,18 @@ func runHubAdvancedMenu(cfg *config.AppConfig) {
 		optNormal := fmt.Sprintf("Front proxy (nginx / HAProxy) for normal nodes   [%d node(s) behind a proxy]", fwdOn)
 		optReverse := fmt.Sprintf("[Hub side] Front proxy (nginx / HAProxy) for reverse nodes  [%d node(s) behind a proxy]", revOn)
 		optShared := fmt.Sprintf("[Hub side] Shared reverse listener (several foreign servers on one SNI)   [%s]", onOff(cfg.SharedReverseAuth))
+		optRevOn := "[Hub side] Reverse mode: switch a node between normal and reverse (on / off)"
 		optRevCfg := "[Hub side] Reverse nodes: ports, SNI, decoy, pipes, front proxy of a node"
 		var choice string
 		if err := survey.AskOne(&survey.Select{
 			Message: "Advanced settings (everything here is off unless you turn it on):",
-			Options: []string{optRevCfg, optNormal, optReverse, optShared, "Back"},
+			Options: []string{optRevOn, optRevCfg, optNormal, optReverse, optShared, "Back"},
 		}, &choice); err != nil || choice == "Back" {
 			return
 		}
 		switch choice {
+		case optRevOn:
+			runReverseIranMenu(cfg)
 		case optRevCfg:
 			runReverseIranAdvanced(cfg)
 		case optNormal:
@@ -210,7 +213,7 @@ func hubProxyReverseNode(cfg *config.AppConfig) {
 		byLabel[l] = n.Alias
 	}
 	if len(labels) == 0 {
-		color.Yellow("\n[!] No reverse nodes yet. Switch one in the Reverse Tunnel menu first.")
+		color.Yellow("\n[!] No reverse nodes yet. Switch one in Advanced settings > [Hub side] Reverse mode first.")
 		return
 	}
 	var picked string
@@ -292,12 +295,13 @@ func foreignProxyOn(cfg *config.AppConfig) bool {
 // its ON/OFF state and is configured here.
 func runForeignAdvancedMenu(cfg *config.AppConfig) {
 	for {
-		optProxy := fmt.Sprintf("Front proxy (nginx / HAProxy shares a port such as 443)   [%s]", onOff(foreignProxyOn(cfg)))
+		optRevOn := fmt.Sprintf("[Foreign side] Reverse mode: dial the hub, or go back (on / off)   [%s]", onOff(len(cfg.ReverseTargets) > 0))
+		optProxy := fmt.Sprintf("Front proxy (nginx / HAProxy shares a port such as 443; choose which mimics)   [%s]", onOff(foreignProxyOn(cfg)))
 		optSource := "Share an SNI with a real service: proxy config routed by the hub's IP"
 		optToken := "Pairing token for the hub (with the proxy's public port)"
 		optHubs := fmt.Sprintf("[Foreign side] Reverse hubs: add another hub / pipe range / remove   [%d hub(s)]", len(cfg.EffectiveReverseHubs()))
 		optUp := fmt.Sprintf("Outgoing traffic: direct, or hand it to a local SOCKS5 proxy   [%s]", upstreamLabel(cfg))
-		options := []string{optProxy, optSource, optToken, optUp}
+		options := []string{optRevOn, optProxy, optSource, optToken, optUp}
 		if len(cfg.ReverseTargets) > 0 {
 			options = append(options, optHubs)
 		}
@@ -307,6 +311,8 @@ func runForeignAdvancedMenu(cfg *config.AppConfig) {
 			return
 		}
 		switch choice {
+		case optRevOn:
+			runReverseForeignMenu(cfg)
 		case optProxy:
 			runForeignFrontProxyMenu(cfg)
 		case optSource:

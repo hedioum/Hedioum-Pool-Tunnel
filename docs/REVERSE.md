@@ -19,9 +19,10 @@ reverse:             hub ◀──dials── foreign          hub opens streams
 ## Switching an existing pair
 
 Everything below is also available from the interactive menu (`hedioum-tunnel`): on the
-hub, **Reverse Tunnel: Switch a Node Normal <-> Reverse** (pick the node, review or edit
-the listener ports, and it prints the token for the foreign); on the foreign,
-**Reverse Mode: Dial the Hub** (paste the token). The commands:
+hub, **Advanced Settings > [Hub side] Reverse mode** (pick the node; it prints the token for
+the foreign) and **[Hub side] Reverse nodes** (listener ports, SNI, decoy, pipes, front proxy);
+on the foreign, **Advanced Settings > [Foreign side] Reverse mode** (paste the token). The
+commands:
 
 On the **hub** (flips the node and prints the command for the foreign):
 

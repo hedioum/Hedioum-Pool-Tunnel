@@ -67,7 +67,7 @@ On the Iran hub point the existing node at the proxy, or add it with the new tok
 hedioum-tunnel edit-node --alias NAME --ports tls=443 --tls-servername cdn.example.com
 ```
 
-Menu: **Front Proxy: share a port such as 443 with nginx / HAProxy**.
+Menu: **Advanced Settings > Front proxy (nginx / HAProxy shares a port such as 443; choose which mimics)**.
 
 ## Iran hub (reverse mode)
 
@@ -78,8 +78,8 @@ hedioum-tunnel reverse-iran --alias NAME \
 hedioum-tunnel front-proxy --alias NAME --kind nginx
 ```
 
-Run the printed `reverse-foreign --token ...` line on the foreign. Menu: **Reverse Tunnel:
-Switch a Node Normal <-> Reverse** > "Through a reverse proxy".
+Run the printed `reverse-foreign --token ...` line on the foreign. Menu: **Advanced Settings >
+[Hub side] Reverse nodes** > "Through a reverse proxy".
 
 ## Choosing which mimics go behind the proxy
 
