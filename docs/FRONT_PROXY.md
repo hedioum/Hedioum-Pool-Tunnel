@@ -81,6 +81,28 @@ hedioum-tunnel front-proxy --alias NAME --kind nginx
 Run the printed `reverse-foreign --token ...` line on the foreign. Menu: **Reverse Tunnel:
 Switch a Node Normal <-> Reverse** > "Through a reverse proxy".
 
+## Choosing which mimics go behind the proxy
+
+You do not have to put every mimic behind the proxy. Pick the ones you want; ports are
+assigned for you. Each chosen mimic keeps its public port (what the hub dials) and listens
+on `public + 40000` on 127.0.0.1:
+
+```
+hedioum-tunnel edit-foreign --front-proxy-auto tls,https-alt,imap --proxy-protocol
+#   8443 -> 48443,  143 -> 40143,  2020 -> 42020   (--front-proxy-auto all for every non-SSH mimic)
+#   --front-proxy-offset N changes the 40000;  --front-proxy-off TYPE[,TYPE] takes a mimic back out
+```
+
+Only the mimics you chose are bound to loopback and require the PROXY header. The others
+stay on their own public port, plain, and the firewall still opens them. (Before this
+change a front proxy made every non-advertised mimic loopback-only; now those stay public.)
+SSH is never put behind the proxy.
+
+An SNI is needed only for the mimic that shares port 443 with your other services: the
+proxy tells it apart by name. Every other chosen mimic gets a port of its own on the proxy
+(`listen 8443;` -> `127.0.0.1:48443`) and needs no SNI. `front-proxy` prints both parts.
+Menu: **Advanced Settings > Front proxy > Choose which mimics go behind the proxy**.
+
 ## nginx
 
 If you already have a `stream` block listening on 443 with `ssl_preread on;`, add one line

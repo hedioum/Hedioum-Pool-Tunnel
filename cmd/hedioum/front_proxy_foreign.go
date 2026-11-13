@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"flag"
 	"fmt"
 	"net"
@@ -19,6 +20,16 @@ import (
 // sit behind an nginx stream / HAProxy that owns a shared public port such as 443 and
 // forwards the tunnel's SNI to the listener. The settings are ListenBind, ProxyProtocol
 // and AdvertisePorts on the foreign config.
+
+const (
+	// defaultFrontProxyOffset is the distance between a mimic's public port and the local
+	// port it listens on behind a front proxy (8443 -> 48443, 143 -> 40143, 2020 -> 42020).
+	defaultFrontProxyOffset = 40000
+	// sharedFrontPort is the public port a front proxy shares with other services (a
+	// panel, user configs) and so routes by SNI. Any other advertised port is a dedicated
+	// forward: the proxy listens on it for this tunnel listener alone, no SNI needed.
+	sharedFrontPort = 443
+)
 
 // parseTypePortList parses "tls=443,https-alt=8443" into a type->port map (any valid
 // mimic type, SSH included). An empty spec is an empty map.
@@ -108,8 +119,10 @@ func applyForeignFrontProxy(cfg *config.AppConfig, o foreignProxyOpts) ([]string
 			}
 			seen[p] = ty
 		}
-		if foreignSNI(cfg) == "" {
-			return nil, fmt.Errorf("a front proxy routes by SNI: set one first (--tls-servername NAME)")
+		for ty, p := range adv {
+			if p == sharedFrontPort && foreignSNI(cfg) == "" {
+				return nil, fmt.Errorf("%s is advertised on the shared port %d, which a front proxy routes by SNI: set one first (--tls-servername NAME)", ty, sharedFrontPort)
+			}
 		}
 	}
 	var warns []string
@@ -133,45 +146,205 @@ func applyForeignFrontProxy(cfg *config.AppConfig, o foreignProxyOpts) ([]string
 	if len(cfg.AdvertisePorts) > 0 && !isLoopbackBind(cfg.ListenBind) {
 		warns = append(warns, "a front proxy is in use but the listeners are still reachable directly; --bind 127.0.0.1 keeps them behind the proxy")
 	}
-	if isLoopbackBind(cfg.ListenBind) {
-		for _, m := range cfg.Mimics {
-			if _, ok := cfg.AdvertisePorts[m.Type]; !ok && m.Type != "ssh" {
-				warns = append(warns, fmt.Sprintf("the %s listener is bound to loopback but not advertised, so a hub cannot reach it; remove it from the mimic set or advertise it", m.Type))
-			}
-		}
-	}
 	return warns, nil
 }
 
-// foreignFrontSpec describes the foreign's tunnel listener for a front proxy: the
-// advertised TLS listener (or the first TLS one) and the SNI.
+// foreignFrontSpec describes the foreign's tunnel listener that the front proxy routes by
+// SNI: the one advertised on the shared port (443), or, with no advertised ports at all,
+// the first TLS listener. It returns errNoSNIListener when every proxied listener has a
+// port of its own.
 func foreignFrontSpec(cfg *config.AppConfig) (frontSpec, error) {
-	sni := foreignSNI(cfg)
-	if sni == "" {
-		return frontSpec{}, fmt.Errorf("no SNI configured: a front proxy routes by SNI (edit-foreign --tls-servername NAME)")
-	}
 	var pick *config.MimicListener
 	for i := range cfg.Mimics {
 		m := &cfg.Mimics[i]
 		if m.Type == "ssh" {
 			continue
 		}
-		if _, adv := cfg.AdvertisePorts[m.Type]; adv {
+		if cfg.AdvertisePorts[m.Type] == sharedFrontPort {
 			pick = m
 			break
 		}
-		if pick == nil {
+		if pick == nil && len(cfg.AdvertisePorts) == 0 {
 			pick = m
 		}
 	}
 	if pick == nil {
+		if len(cfg.AdvertisePorts) > 0 {
+			return frontSpec{}, errNoSNIListener
+		}
 		return frontSpec{}, fmt.Errorf("the foreign has no TLS listener to front")
 	}
+	sni := foreignSNI(cfg)
+	if sni == "" {
+		return frontSpec{}, fmt.Errorf("no SNI configured: a front proxy routes by SNI (edit-foreign --tls-servername NAME)")
+	}
+	return frontSpec{Upstream: net.JoinHostPort(localHost(cfg), strconv.Itoa(pick.Port)), SNI: sni, ProxyProtocol: cfg.ProxyProtocol}, nil
+}
+
+var errNoSNIListener = fmt.Errorf("no listener is routed by SNI")
+
+// localHost is the address the proxy forwards to: the listener bind, or loopback.
+func localHost(cfg *config.AppConfig) string {
 	host := cfg.ListenBind
 	if host == "" || net.ParseIP(host).IsUnspecified() {
 		host = "127.0.0.1"
 	}
-	return frontSpec{Upstream: net.JoinHostPort(host, strconv.Itoa(pick.Port)), SNI: sni, ProxyProtocol: cfg.ProxyProtocol}, nil
+	return host
+}
+
+// dedicatedForward is a proxied listener that has a public port of its own: the proxy
+// listens on Public and forwards every connection to Upstream. No SNI is involved.
+type dedicatedForward struct {
+	Type     string
+	Public   int
+	Upstream string
+}
+
+// foreignDedicatedForwards lists the proxied listeners that are not on the shared port,
+// sorted by public port.
+func foreignDedicatedForwards(cfg *config.AppConfig) []dedicatedForward {
+	var out []dedicatedForward
+	for _, m := range cfg.Mimics {
+		pub, ok := cfg.AdvertisePorts[m.Type]
+		if !ok || m.Type == "ssh" || pub == sharedFrontPort {
+			continue
+		}
+		out = append(out, dedicatedForward{Type: m.Type, Public: pub, Upstream: net.JoinHostPort(localHost(cfg), strconv.Itoa(m.Port))})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Public < out[j].Public })
+	return out
+}
+
+// nginxDedicated renders one stream server per dedicated forward.
+func nginxDedicated(fw []dedicatedForward, proxyProtocol bool) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "# nginx: one stream server per listener that has its own public port (no SNI needed).\n")
+	fmt.Fprintf(&b, "# Put these inside your existing `stream { ... }` block (or a new one):\n\n")
+	for _, f := range fw {
+		fmt.Fprintf(&b, "    server {   # %s\n        listen %d;\n        proxy_pass %s;\n", f.Type, f.Public, f.Upstream)
+		if proxyProtocol {
+			fmt.Fprintf(&b, "        proxy_protocol on;\n")
+		}
+		fmt.Fprintf(&b, "    }\n")
+	}
+	return b.String()
+}
+
+// haproxyDedicated renders one frontend/backend pair per dedicated forward.
+func haproxyDedicated(fw []dedicatedForward, proxyProtocol bool) string {
+	send := ""
+	if proxyProtocol {
+		send = " send-proxy"
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "# HAProxy: one frontend per listener that has its own public port (no SNI needed)\n")
+	for _, f := range fw {
+		fmt.Fprintf(&b, "frontend hedioum_%s_%d\n    bind :%d\n    mode tcp\n    default_backend hedioum_%s_%d\n\n", f.Type, f.Public, f.Public, f.Type, f.Public)
+		fmt.Fprintf(&b, "backend hedioum_%s_%d\n    mode tcp\n    server hub %s%s\n\n", f.Type, f.Public, f.Upstream, send)
+	}
+	return b.String()
+}
+
+// autoFrontProxy puts the chosen mimic types behind the front proxy in one step: each
+// keeps its current public port (what a hub dials) and moves its listener to public+offset
+// on the loopback address (8443 -> 48443, 143 -> 40143), with PROXY protocol if asked.
+// types may be empty or ["all"] for every non-SSH listener. Types not chosen are left as
+// they are. Running it again is harmless.
+func autoFrontProxy(cfg *config.AppConfig, types []string, offset int, proxyProtocol bool) ([]string, error) {
+	if offset < 1 || offset > 60000 {
+		return nil, fmt.Errorf("the port offset must be between 1 and 60000")
+	}
+	have := map[string]int{} // type -> index in cfg.Mimics
+	for i, m := range cfg.Mimics {
+		if m.Type != "ssh" {
+			have[m.Type] = i
+		}
+	}
+	sel := map[string]bool{}
+	for _, ty := range types {
+		ty = strings.TrimSpace(ty)
+		if ty == "" {
+			continue
+		}
+		if ty == "all" {
+			for t := range have {
+				sel[t] = true
+			}
+			continue
+		}
+		if _, ok := have[ty]; !ok {
+			return nil, fmt.Errorf("--front-proxy-auto %s: the foreign has no such TLS listener (SSH cannot be routed by SNI)", ty)
+		}
+		sel[ty] = true
+	}
+	if len(sel) == 0 {
+		for t := range have {
+			sel[t] = true
+		}
+	}
+	adv := map[string]int{}
+	for ty, p := range cfg.AdvertisePorts {
+		adv[ty] = p
+	}
+	used := map[int]string{}
+	for _, m := range cfg.Mimics {
+		used[m.Port] = m.Type
+	}
+	moved := map[string]int{}
+	for ty := range sel {
+		m := &cfg.Mimics[have[ty]]
+		pub, ok := adv[ty]
+		if !ok {
+			pub = m.Port
+		}
+		local := pub + offset
+		if local > 65535 {
+			return nil, fmt.Errorf("%s: public port %d + offset %d is above 65535; use a smaller --front-proxy-offset", ty, pub, offset)
+		}
+		if other, taken := used[local]; taken && other != ty {
+			return nil, fmt.Errorf("%s: local port %d is already used by the %s listener", ty, local, other)
+		}
+		adv[ty] = pub
+		moved[ty] = local
+	}
+	for ty, local := range moved {
+		cfg.Mimics[have[ty]].Port = local
+	}
+	bind := "127.0.0.1"
+	return applyForeignFrontProxy(cfg, foreignProxyOpts{Bind: &bind, ProxyProtocol: &proxyProtocol, Advertise: adv, AdvertiseSet: true})
+}
+
+// removeFrontProxy takes the chosen types out from behind the proxy: each listener goes
+// back to its public port and is no longer advertised separately. When no type is left
+// behind the proxy, the bind address and PROXY protocol are cleared too.
+func removeFrontProxy(cfg *config.AppConfig, types []string) error {
+	adv := map[string]int{}
+	for ty, p := range cfg.AdvertisePorts {
+		adv[ty] = p
+	}
+	for _, ty := range types {
+		ty = strings.TrimSpace(ty)
+		if ty == "" {
+			continue
+		}
+		pub, ok := adv[ty]
+		if !ok {
+			return fmt.Errorf("%s is not behind the front proxy", ty)
+		}
+		for i := range cfg.Mimics {
+			if cfg.Mimics[i].Type == ty {
+				cfg.Mimics[i].Port = pub
+			}
+		}
+		delete(adv, ty)
+	}
+	empty, off := "", false
+	if len(adv) == 0 {
+		_, err := applyForeignFrontProxy(cfg, foreignProxyOpts{Bind: &empty, ProxyProtocol: &off, AdvertiseSet: true})
+		return err
+	}
+	_, err := applyForeignFrontProxy(cfg, foreignProxyOpts{Advertise: adv, AdvertiseSet: true})
+	return err
 }
 
 // foreignPairingToken builds the paste-only pairing token for the hub, with advertised
@@ -200,6 +373,16 @@ func printHubHintForForeign(cfg *config.AppConfig, sp frontSpec, publicPort int)
 	color.HiCyan("# On the Iran hub, point the node at the proxy (port and SNI):")
 	if ty != "" {
 		fmt.Printf("hedioum-tunnel edit-node --alias NAME --ports %s=%d --tls-servername %s\n", ty, publicPort, sp.SNI)
+	}
+	fmt.Println("# or print a fresh paste-only token with `hedioum-tunnel pairing-token` on this foreign.")
+}
+
+// printDedicatedHubHint tells the operator how a hub reaches the listeners that have a
+// public port of their own.
+func printDedicatedHubHint(fw []dedicatedForward) {
+	color.HiCyan("# Listeners with their own public port: a hub dials that port, no SNI involved")
+	for _, f := range fw {
+		fmt.Printf("hedioum-tunnel edit-node --alias NAME --ports %s=%d\n", f.Type, f.Public)
 	}
 	fmt.Println("# or print a fresh paste-only token with `hedioum-tunnel pairing-token` on this foreign.")
 }
@@ -234,7 +417,7 @@ func runForeignFrontProxyMenu(cfg *config.AppConfig) {
 	_ = survey.AskOne(&survey.Select{
 		Message: "Front proxy (nginx / HAProxy sharing a port such as 443):",
 		Options: []string{
-			"Set up / change",
+			"Choose which mimics go behind the proxy (ports are assigned automatically)",
 			"Show the nginx / HAProxy config",
 			"Remove the front-proxy settings",
 			"Cancel",
@@ -250,103 +433,108 @@ func runForeignFrontProxyMenu(cfg *config.AppConfig) {
 			return
 		}
 		saveAndRestart(cfg)
-	case strings.HasPrefix(choice, "Set up"):
-		var types []string
-		for _, m := range cfg.Mimics {
-			if m.Type != "ssh" {
-				types = append(types, m.Type)
+	case strings.HasPrefix(choice, "Choose"):
+		runChooseFrontProxied(cfg)
+	}
+}
+
+// runChooseFrontProxied lets the operator tick the mimic types that go behind the
+// proxy, in one screen: ports are assigned automatically (local = public + 40000) and
+// the types left unticked keep their public listener.
+func runChooseFrontProxied(cfg *config.AppConfig) {
+	var types, cur []string
+	for _, m := range cfg.Mimics {
+		if m.Type == "ssh" {
+			continue
+		}
+		types = append(types, m.Type)
+		if cfg.FrontProxied(m.Type) {
+			cur = append(cur, m.Type)
+		}
+	}
+	if len(types) == 0 {
+		color.Red("[x] The foreign has no TLS listener; enable a TLS mimic first (Edit Foreign Configuration).")
+		return
+	}
+	var picked []string
+	if err := survey.AskOne(&survey.MultiSelect{
+		Message: "Which mimics go behind the front proxy? (space to tick; the others stay public; SSH never goes behind it)",
+		Options: types,
+		Default: cur,
+	}, &picked); err != nil {
+		return
+	}
+	pp := cfg.ProxyProtocol
+	if len(cfg.AdvertisePorts) == 0 {
+		pp = true
+	}
+	if len(picked) > 0 {
+		_ = survey.AskOne(&survey.Confirm{Message: "Does your proxy send the PROXY protocol? (nginx: `proxy_protocol on;` in the stream server)", Default: pp}, &pp)
+	}
+	// Types that were behind the proxy and are no longer ticked go back to public.
+	keep := map[string]bool{}
+	for _, t := range picked {
+		keep[t] = true
+	}
+	var drop []string
+	for _, t := range cur {
+		if !keep[t] {
+			drop = append(drop, t)
+		}
+	}
+	if len(drop) > 0 {
+		if err := removeFrontProxy(cfg, drop); err != nil {
+			color.Red("[x] %v", err)
+			return
+		}
+	}
+	if len(picked) > 0 {
+		// The type on the shared port is routed by SNI and needs one; the rest do not.
+		for i, m := range cfg.Mimics {
+			pub := cfg.AdvertisePorts[m.Type]
+			if pub == 0 {
+				pub = m.Port
 			}
-		}
-		if len(types) == 0 {
-			color.Red("[x] The foreign has no TLS listener; enable a TLS mimic first (Edit Foreign Configuration).")
-			return
-		}
-		ty := types[0]
-		if len(types) > 1 {
-			_ = survey.AskOne(&survey.Select{Message: "A proxy routes one SNI to one listener. Which mimic type?", Options: types}, &ty)
-		}
-		sni := foreignSNI(cfg)
-		_ = survey.AskOne(&survey.Input{Message: "SNI that identifies the tunnel (a name not used by your other services):", Default: sni}, &sni)
-		sni = strings.TrimSpace(sni)
-		if sni == "" {
-			color.Red("[x] An SNI is required.")
-			return
-		}
-		portStr := "443"
-		_ = survey.AskOne(&survey.Input{Message: "Public port the proxy listens on (what the hub dials):", Default: "443"}, &portStr)
-		port, err := strconv.Atoi(strings.TrimSpace(portStr))
-		if err != nil || validPort(port) != nil {
-			color.Red("[x] Invalid port.")
-			return
-		}
-		// The tunnel's own (local) port: the proxy forwards to it, so it must differ from
-		// the proxy's public port when both run on this host.
-		curLocal := 0
-		for _, m := range cfg.Mimics {
-			if m.Type == ty {
-				curLocal = m.Port
-			}
-		}
-		if curLocal == port || curLocal == 0 {
-			curLocal = 8443
-			if port == 8443 {
-				curLocal = 2053
-			}
-		}
-		localStr := strconv.Itoa(curLocal)
-		_ = survey.AskOne(&survey.Input{Message: "Port the tunnel listens on locally (the proxy forwards to it):", Default: localStr}, &localStr)
-		localPort, lerr := strconv.Atoi(strings.TrimSpace(localStr))
-		if lerr != nil || validPort(localPort) != nil {
-			color.Red("[x] Invalid port.")
-			return
-		}
-		if localPort == port {
-			color.Red("[x] The local port must differ from the proxy's public port (%d).", port)
-			return
-		}
-		pp := false
-		_ = survey.AskOne(&survey.Confirm{Message: "Does your proxy send the PROXY protocol? (nginx: `proxy_protocol on;` in the stream server)", Default: false}, &pp)
-		local := true
-		_ = survey.AskOne(&survey.Confirm{Message: "Bind the listeners to 127.0.0.1 so they are only reachable through the proxy?", Default: true}, &local)
-		bind := ""
-		if local {
-			bind = "127.0.0.1"
-		}
-		for i := range cfg.Mimics {
-			if cfg.Mimics[i].Type != "ssh" {
+			if keep[m.Type] && pub == sharedFrontPort && foreignSNI(cfg) == "" {
+				sni := ""
+				_ = survey.AskOne(&survey.Input{Message: fmt.Sprintf("SNI that identifies the tunnel on port %d (a name not used by your other services):", sharedFrontPort)}, &sni)
+				sni = strings.TrimSpace(sni)
+				if sni == "" {
+					color.Red("[x] An SNI is required for the listener on port %d.", sharedFrontPort)
+					return
+				}
 				cfg.Mimics[i].ServerName = sni
 			}
-			if cfg.Mimics[i].Type == ty {
-				cfg.Mimics[i].Port = localPort
-			}
 		}
-		warns, aerr := applyForeignFrontProxy(cfg, foreignProxyOpts{Bind: &bind, ProxyProtocol: &pp, Advertise: map[string]int{ty: port}, AdvertiseSet: true})
-		if aerr != nil {
-			color.Red("[x] %v", aerr)
+		warns, err := autoFrontProxy(cfg, picked, defaultFrontProxyOffset, pp)
+		if err != nil {
+			color.Red("[x] %v", err)
 			return
 		}
 		for _, w := range warns {
 			color.Yellow("[!] %s", w)
 		}
-		saveAndRestart(cfg)
-		showForeignFrontProxy(cfg)
 	}
+	saveAndRestart(cfg)
+	showForeignFrontProxy(cfg)
 }
 
 // showForeignFrontProxy prints the proxy configs and the hub-side instructions.
 func showForeignFrontProxy(cfg *config.AppConfig) {
 	sp, err := foreignFrontSpec(cfg)
-	if err != nil {
+	if err != nil && !errors.Is(err, errNoSNIListener) {
 		color.Red("[x] %v", err)
 		return
 	}
-	port := 443
-	for _, p := range cfg.AdvertisePorts {
-		port = p
-		break
-	}
 	fmt.Println()
-	fmt.Println(nginxFor(sp, port))
-	fmt.Println(haproxyFor(sp, port))
-	printHubHintForForeign(cfg, sp, port)
+	if err == nil {
+		fmt.Println(nginxFor(sp, sharedFrontPort))
+		fmt.Println(haproxyFor(sp, sharedFrontPort))
+		printHubHintForForeign(cfg, sp, sharedFrontPort)
+	}
+	if fw := foreignDedicatedForwards(cfg); len(fw) > 0 {
+		fmt.Println(nginxDedicated(fw, cfg.ProxyProtocol))
+		fmt.Println(haproxyDedicated(fw, cfg.ProxyProtocol))
+		printDedicatedHubHint(fw)
+	}
 }

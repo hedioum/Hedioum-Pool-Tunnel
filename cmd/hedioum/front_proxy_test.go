@@ -170,3 +170,182 @@ func TestNodeSourceIPsUseEndpointAddresses(t *testing.T) {
 		t.Fatalf("got %v, want both nodes of the shared listener and not the other one", got)
 	}
 }
+
+func multiMimicCfg() *config.AppConfig {
+	return &config.AppConfig{
+		Role: "foreign", AuthToken: "0123456789abcdef0123456789abcdef",
+		Mimics: []config.MimicListener{
+			{Type: "ssh", Port: 22},
+			{Type: "tls", Port: 443, ServerName: "i1.example.test"},
+			{Type: "https-alt", Port: 8443},
+			{Type: "imap", Port: 143},
+			{Type: "cpanel", Port: 2020},
+		},
+	}
+}
+
+func portOfType(cfg *config.AppConfig, ty string) int {
+	for _, m := range cfg.Mimics {
+		if m.Type == ty {
+			return m.Port
+		}
+	}
+	return 0
+}
+
+// One step puts several mimics behind the proxy: each keeps its public port and listens
+// on public+40000 on loopback.
+func TestAutoFrontProxyAssignsPorts(t *testing.T) {
+	cfg := multiMimicCfg()
+	if _, err := autoFrontProxy(cfg, []string{"all"}, defaultFrontProxyOffset, true); err != nil {
+		t.Fatal(err)
+	}
+	for ty, want := range map[string]int{"tls": 40443, "https-alt": 48443, "imap": 40143, "cpanel": 42020} {
+		if got := portOfType(cfg, ty); got != want {
+			t.Errorf("%s listens on %d, want %d", ty, got, want)
+		}
+	}
+	for ty, want := range map[string]int{"tls": 443, "https-alt": 8443, "imap": 143, "cpanel": 2020} {
+		if cfg.AdvertisePorts[ty] != want {
+			t.Errorf("%s advertised as %d, want %d (the public port a hub dials)", ty, cfg.AdvertisePorts[ty], want)
+		}
+	}
+	if portOfType(cfg, "ssh") != 22 || cfg.AdvertisePorts["ssh"] != 0 {
+		t.Error("SSH must be left alone")
+	}
+	if cfg.ListenBind != "127.0.0.1" || !cfg.ProxyProtocol {
+		t.Errorf("bind/proxy protocol not set: %q %v", cfg.ListenBind, cfg.ProxyProtocol)
+	}
+	// Running it again changes nothing.
+	if _, err := autoFrontProxy(cfg, []string{"all"}, defaultFrontProxyOffset, true); err != nil {
+		t.Fatal(err)
+	}
+	if portOfType(cfg, "https-alt") != 48443 || cfg.AdvertisePorts["https-alt"] != 8443 {
+		t.Fatal("a second run must be harmless")
+	}
+}
+
+// Only the ticked types go behind the proxy; the rest stay public, and the firewall
+// still opens the public ones.
+func TestAutoFrontProxyOnlyChosenTypes(t *testing.T) {
+	cfg := multiMimicCfg()
+	if _, err := autoFrontProxy(cfg, []string{"tls", "https-alt"}, defaultFrontProxyOffset, true); err != nil {
+		t.Fatal(err)
+	}
+	if portOfType(cfg, "imap") != 143 || portOfType(cfg, "cpanel") != 2020 {
+		t.Fatal("unchosen types must keep their listener port")
+	}
+	if cfg.FrontProxied("imap") || !cfg.FrontProxied("tls") {
+		t.Fatal("only the chosen types are behind the proxy")
+	}
+	open := map[int]bool{}
+	for _, p := range firewallPorts(cfg) {
+		open[p] = true
+	}
+	if !open[22] || !open[143] || !open[2020] {
+		t.Fatalf("public listeners must stay open: %v", firewallPorts(cfg))
+	}
+	if open[40443] || open[48443] {
+		t.Fatalf("listeners behind the proxy must not be opened: %v", firewallPorts(cfg))
+	}
+}
+
+func TestAutoFrontProxyErrors(t *testing.T) {
+	cfg := multiMimicCfg()
+	if _, err := autoFrontProxy(cfg, []string{"ssh"}, defaultFrontProxyOffset, false); err == nil {
+		t.Error("SSH cannot be put behind a proxy")
+	}
+	if _, err := autoFrontProxy(cfg, []string{"nope"}, defaultFrontProxyOffset, false); err == nil {
+		t.Error("an unknown type must be rejected")
+	}
+	cfg = multiMimicCfg()
+	cfg.Mimics[1].Port = 30000
+	if _, err := autoFrontProxy(cfg, []string{"tls"}, defaultFrontProxyOffset, false); err == nil {
+		t.Error("public port + offset above 65535 must be rejected")
+	}
+	cfg = multiMimicCfg()
+	cfg.Mimics = append(cfg.Mimics, config.MimicListener{Type: "smtps", Port: 40443})
+	if _, err := autoFrontProxy(cfg, []string{"tls"}, defaultFrontProxyOffset, false); err == nil {
+		t.Error("a local port that another listener already uses must be rejected")
+	}
+	if _, err := autoFrontProxy(multiMimicCfg(), []string{"tls"}, 0, false); err == nil {
+		t.Error("offset 0 must be rejected")
+	}
+}
+
+// Taking a type back out restores its public port; when none is left, the bind and
+// PROXY protocol are cleared.
+func TestRemoveFrontProxy(t *testing.T) {
+	cfg := multiMimicCfg()
+	if _, err := autoFrontProxy(cfg, []string{"tls", "https-alt"}, defaultFrontProxyOffset, true); err != nil {
+		t.Fatal(err)
+	}
+	if err := removeFrontProxy(cfg, []string{"https-alt"}); err != nil {
+		t.Fatal(err)
+	}
+	if portOfType(cfg, "https-alt") != 8443 || cfg.FrontProxied("https-alt") {
+		t.Fatal("a removed type must go back to its public port")
+	}
+	if cfg.ListenBind != "127.0.0.1" || !cfg.FrontProxied("tls") {
+		t.Fatal("the other type stays behind the proxy")
+	}
+	if err := removeFrontProxy(cfg, []string{"tls"}); err != nil {
+		t.Fatal(err)
+	}
+	if portOfType(cfg, "tls") != 443 || cfg.ListenBind != "" || cfg.ProxyProtocol || len(cfg.AdvertisePorts) != 0 {
+		t.Fatalf("last type removed must clear the proxy settings: %+v", cfg)
+	}
+	if err := removeFrontProxy(cfg, []string{"tls"}); err == nil {
+		t.Fatal("removing a type that is not behind the proxy must say so")
+	}
+}
+
+// The type on the shared port is routed by SNI; the others get a port of their own and
+// need no SNI.
+func TestFrontProxyRoutesSharedPortBySNIAndOthersByPort(t *testing.T) {
+	cfg := multiMimicCfg()
+	if _, err := autoFrontProxy(cfg, []string{"tls", "https-alt", "imap"}, defaultFrontProxyOffset, true); err != nil {
+		t.Fatal(err)
+	}
+	spec, err := foreignFrontSpec(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if spec.SNI != "i1.example.test" || spec.Upstream != "127.0.0.1:40443" {
+		t.Fatalf("the shared-port listener must be routed by SNI: %+v", spec)
+	}
+	fw := foreignDedicatedForwards(cfg)
+	if len(fw) != 2 || fw[0].Public != 143 || fw[1].Public != 8443 || fw[1].Upstream != "127.0.0.1:48443" {
+		t.Fatalf("dedicated forwards wrong: %+v", fw)
+	}
+	ng := nginxDedicated(fw, true)
+	for _, want := range []string{"listen 143;", "proxy_pass 127.0.0.1:40143;", "listen 8443;", "proxy_pass 127.0.0.1:48443;", "proxy_protocol on;"} {
+		if !strings.Contains(ng, want) {
+			t.Errorf("nginx forwards missing %q:\n%s", want, ng)
+		}
+	}
+	if strings.Contains(ng, "ssl_preread") || strings.Contains(ng, "i1.example.test") {
+		t.Errorf("a dedicated forward needs no SNI:\n%s", ng)
+	}
+	hp := haproxyDedicated(fw, true)
+	for _, want := range []string{"bind :143", "bind :8443", "server hub 127.0.0.1:48443 send-proxy"} {
+		if !strings.Contains(hp, want) {
+			t.Errorf("haproxy forwards missing %q:\n%s", want, hp)
+		}
+	}
+	// With nothing on the shared port there is no SNI listener, and no SNI is needed.
+	cfg2 := multiMimicCfg()
+	cfg2.Mimics[1].ServerName = ""
+	if _, err := autoFrontProxy(cfg2, []string{"https-alt"}, defaultFrontProxyOffset, true); err != nil {
+		t.Fatalf("a dedicated port needs no SNI: %v", err)
+	}
+	if _, err := foreignFrontSpec(cfg2); err != errNoSNIListener {
+		t.Fatalf("want errNoSNIListener, got %v", err)
+	}
+	// But the shared port does need one.
+	cfg3 := multiMimicCfg()
+	cfg3.Mimics[1].ServerName = ""
+	if _, err := autoFrontProxy(cfg3, []string{"tls"}, defaultFrontProxyOffset, true); err == nil {
+		t.Fatal("a listener on the shared port is routed by SNI and must need one")
+	}
+}

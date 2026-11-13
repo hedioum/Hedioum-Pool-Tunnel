@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"flag"
 	"fmt"
 	"net"
@@ -244,12 +245,17 @@ func cmdFrontProxy(args []string) {
 	}
 
 	var sp frontSpec
+	var fw []dedicatedForward
+	haveSNI := true
 	switch cfg.Role {
 	case "foreign":
 		sp, err = foreignFrontSpec(cfg)
-		if err != nil {
+		if errors.Is(err, errNoSNIListener) {
+			haveSNI = false // every proxied listener has a port of its own
+		} else if err != nil {
 			fail("%v", err)
 		}
+		fw = foreignDedicatedForwards(cfg)
 	case "iran":
 		if *alias == "" {
 			fail("--alias is required on the hub (the reverse node to front)")
@@ -267,7 +273,7 @@ func cmdFrontProxy(args []string) {
 		fail("unknown role %q", cfg.Role)
 	}
 
-	if *bySource || *sources != "" {
+	if haveSNI && (*bySource || *sources != "") {
 		ips, perr := parseSourceIPs(*sources)
 		if perr != nil {
 			fail("--source-ips: %v", perr)
@@ -282,12 +288,22 @@ func cmdFrontProxy(args []string) {
 	}
 
 	color.HiCyan("# Front-proxy configuration (printed only; nothing was changed)\n")
-	if *kind == "haproxy" {
-		fmt.Println(haproxyFor(sp, *port))
-	} else {
-		fmt.Println(nginxFor(sp, *port))
+	if haveSNI {
+		if *kind == "haproxy" {
+			fmt.Println(haproxyFor(sp, *port))
+		} else {
+			fmt.Println(nginxFor(sp, *port))
+		}
+		if cfg.Role == "foreign" {
+			printHubHintForForeign(cfg, sp, *port)
+		}
 	}
-	if cfg.Role == "foreign" {
-		printHubHintForForeign(cfg, sp, *port)
+	if len(fw) > 0 {
+		if *kind == "haproxy" {
+			fmt.Println(haproxyDedicated(fw, cfg.ProxyProtocol))
+		} else {
+			fmt.Println(nginxDedicated(fw, cfg.ProxyProtocol))
+		}
+		printDedicatedHubHint(fw)
 	}
 }
