@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 )
 
 // AppConfig represents the root structure of the application configuration
@@ -22,6 +23,11 @@ type AppConfig struct {
 	// optionally pins the source IP on multi-IP servers.
 	EgressIPMode string `json:"egress_ip_mode,omitempty"`
 	EgressBindIP string `json:"egress_bind_ip,omitempty"`
+	// EgressUpstream hands the foreign's outgoing traffic (TCP and UDP) to a local SOCKS5
+	// proxy ("host:port", e.g. the mixed/socks inbound of 3x-ui or xray on 127.0.0.1)
+	// instead of dialing the destination directly ("freedom"). Routing decisions (direct,
+	// WARP, IPv4/IPv6) then belong to that proxy. Empty = direct.
+	EgressUpstream string `json:"egress_upstream,omitempty"`
 	// DecoyPort is the local port the real sshd was relocated to; unauthorized
 	// probes on the public listen port are proxied here. Default 2022.
 	DecoyPort int `json:"decoy_port,omitempty"`
@@ -435,4 +441,23 @@ func (cfg *AppConfig) RemoveForeignNode(alias string) bool {
 		}
 	}
 	return false
+}
+
+// NormalizeEgressUpstream validates a SOCKS5 upstream given as "host:port" or
+// "socks5://host:port" and returns it as "host:port". An empty string means "direct".
+func NormalizeEgressUpstream(s string) (string, error) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return "", nil
+	}
+	s = strings.TrimPrefix(s, "socks5://")
+	host, port, err := net.SplitHostPort(s)
+	if err != nil || host == "" {
+		return "", fmt.Errorf("upstream must look like 127.0.0.1:10808 or socks5://127.0.0.1:10808")
+	}
+	n, err := strconv.Atoi(port)
+	if err != nil || n < 1 || n > 65535 {
+		return "", fmt.Errorf("upstream port %q is not valid", port)
+	}
+	return net.JoinHostPort(host, port), nil
 }

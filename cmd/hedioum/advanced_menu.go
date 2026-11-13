@@ -233,7 +233,8 @@ func runForeignAdvancedMenu(cfg *config.AppConfig) {
 		optSource := "Share an SNI with a real service: proxy config routed by the hub's IP"
 		optToken := "Pairing token for the hub (with the proxy's public port)"
 		optHubs := fmt.Sprintf("[Foreign side] Reverse hubs: add another hub / pipe range / remove   [%d hub(s)]", len(cfg.EffectiveReverseHubs()))
-		options := []string{optRevOn, optProxy, optSource, optToken}
+		optUp := fmt.Sprintf("Outgoing traffic: direct, or hand it to a local SOCKS5 proxy   [%s]", upstreamLabel(cfg))
+		options := []string{optRevOn, optProxy, optSource, optToken, optUp}
 		if len(cfg.ReverseTargets) > 0 {
 			options = append(options, optHubs)
 		}
@@ -251,6 +252,8 @@ func runForeignAdvancedMenu(cfg *config.AppConfig) {
 			showForeignConfigBySource(cfg)
 		case optToken:
 			cmdPairingToken(nil)
+		case optUp:
+			runEgressUpstreamMenu(cfg)
 		case optHubs:
 			var act string
 			_ = survey.AskOne(&survey.Select{Message: "Reverse hubs:", Options: []string{"Add another hub", "Show / change pipe range / remove", "Cancel"}}, &act)
@@ -289,4 +292,45 @@ func showForeignConfigBySource(cfg *config.AppConfig) {
 	} else {
 		fmt.Println(nginxFor(sp, 443))
 	}
+}
+
+func upstreamLabel(cfg *config.AppConfig) string {
+	if cfg.EgressUpstream == "" {
+		return "direct"
+	}
+	return "SOCKS5 " + cfg.EgressUpstream
+}
+
+// runEgressUpstreamMenu chooses how the foreign sends traffic to the internet: dialing
+// the destination itself ("freedom"), or handing every TCP stream and UDP flow to a local
+// SOCKS5 proxy such as a 3x-ui / xray inbound on 127.0.0.1. Routing (direct, WARP, IPv4
+// or IPv6) is then decided by that proxy's own rules.
+func runEgressUpstreamMenu(cfg *config.AppConfig) {
+	const optDirect = "Direct (freedom): the foreign dials the destination itself"
+	const optSocks = "SOCKS5 proxy: hand traffic to a local proxy (TCP and UDP)"
+	var choice string
+	if err := survey.AskOne(&survey.Select{Message: "Where does outgoing traffic go?", Options: []string{optDirect, optSocks, "Cancel"}}, &choice); err != nil || choice == "Cancel" {
+		return
+	}
+	if choice == optDirect {
+		cfg.EgressUpstream = ""
+		saveAndRestart(cfg)
+		return
+	}
+	def := cfg.EgressUpstream
+	if def == "" {
+		def = "127.0.0.1:10808"
+	}
+	for {
+		addr, err := config.NormalizeEgressUpstream(promptStrDefault("SOCKS5 address (host:port), no password:", def))
+		if err != nil || addr == "" {
+			color.Red("[x] Enter something like 127.0.0.1:10808")
+			continue
+		}
+		cfg.EgressUpstream = addr
+		break
+	}
+	color.Yellow("[!] The proxy must be running, or every connection fails (nothing falls back to direct).")
+	color.Yellow("[!] egress_ip_mode / egress_bind_ip no longer apply: the proxy chooses IPv4/IPv6 and the source IP.")
+	saveAndRestart(cfg)
 }
