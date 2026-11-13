@@ -528,3 +528,52 @@ func TestForeignToggleResumes(t *testing.T) {
 		t.Fatal("resume with nothing saved must say so")
 	}
 }
+
+// The hub puts its pipe range in the reverse token and the foreign adopts it, so no flag is
+// needed on the foreign; --conns still wins.
+func TestPipeRangeTravelsInTheToken(t *testing.T) {
+	fakePortsInUse(t)
+	cfg := &config.AppConfig{Role: "iran", ForeignNodes: []config.ForeignNode{{
+		Alias: "a", AuthToken: "0123456789abcdef0123456789abcdef",
+		Endpoints: []config.Endpoint{{Target: "1.2.3.4:443", Mimic: "tls", ServerName: "i1.example.test"}},
+	}}}
+	_, tok, err := applyReverseIran(cfg, "a", nil, "198.51.100.7", reverseOpts{MinPipes: 6, MaxPipes: 14})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := cfg.ForeignNodes[0]; n.MinConnections != 6 || n.MaxConnections != 14 {
+		t.Fatalf("the hub node must hold the range it announces: %d-%d", n.MinConnections, n.MaxConnections)
+	}
+	pt, _, err := pairing.Decode(tok)
+	if err != nil || pt.MinConns != 6 || pt.MaxConns != 14 {
+		t.Fatalf("token range: %+v %v", pt, err)
+	}
+	f := &config.AppConfig{Role: "foreign", AuthToken: "0123456789abcdef0123456789abcdef"}
+	if _, _, err := applyReverseForeign(f, tok, 0, false); err != nil {
+		t.Fatal(err)
+	}
+	hubs := f.EffectiveReverseHubs()
+	if len(hubs) != 1 || hubs[0].MinConns != 6 || hubs[0].MaxConns != 14 {
+		t.Fatalf("foreign must adopt the hub's range: %+v", hubs)
+	}
+	f2 := &config.AppConfig{Role: "foreign", AuthToken: "0123456789abcdef0123456789abcdef"}
+	if _, _, err := applyReverseForeign(f2, tok, 8, false); err != nil {
+		t.Fatal(err)
+	}
+	if h := f2.EffectiveReverseHubs()[0]; h.MinConns != 8 || h.MaxConns != 8 {
+		t.Fatalf("--conns must win: %+v", h)
+	}
+	// A bad range is refused before anything changes.
+	if _, _, err := applyReverseIran(cfg, "a", nil, "198.51.100.7", reverseOpts{MinPipes: 300}); err == nil {
+		t.Fatal("a pipe range above the limit must be rejected")
+	}
+	// An older token with no range keeps the default.
+	old := pairing.Encode(pairing.Token{ExitIP: "198.51.100.7", AuthKey: "0123456789abcdef0123456789abcdef", Endpoints: map[string]int{"tls": 443}, Reverse: true})
+	f3 := &config.AppConfig{Role: "foreign", AuthToken: "0123456789abcdef0123456789abcdef"}
+	if _, _, err := applyReverseForeign(f3, old, 0, false); err != nil {
+		t.Fatal(err)
+	}
+	if h := f3.EffectiveReverseHubs()[0]; h.MinConns != config.DefaultReverseConns || h.MaxConns != config.DefaultReverseConns {
+		t.Fatalf("no range in the token: want the default, got %+v", h)
+	}
+}

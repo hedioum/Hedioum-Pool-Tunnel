@@ -41,8 +41,16 @@ func reverseDecoyChoice(cfg *config.AppConfig, node *config.ForeignNode) string 
 	return "apache"
 }
 
-// runReverseIranMenu flips one hub node between normal and reverse mode.
-func runReverseIranMenu(cfg *config.AppConfig) {
+// runReverseIranMenu is the hub's top-level reverse entry: one step to switch a node
+// between normal and reverse. Ports, SNI, decoy, front proxy and sharing are in
+// Advanced settings (runReverseIranAdvanced).
+func runReverseIranMenu(cfg *config.AppConfig) { reverseIranMenu(cfg, false) }
+
+// runReverseIranAdvanced is [Hub side] reverse configuration: ports, SNI, decoy, front
+// proxy and shared listeners of a reverse node.
+func runReverseIranAdvanced(cfg *config.AppConfig) { reverseIranMenu(cfg, true) }
+
+func reverseIranMenu(cfg *config.AppConfig, advanced bool) {
 	if len(cfg.ForeignNodes) == 0 {
 		color.Yellow("\n[!] No egress nodes configured. Use Option 3 to add one.")
 		return
@@ -54,10 +62,16 @@ func runReverseIranMenu(cfg *config.AppConfig) {
 		labels = append(labels, l)
 		byLabel[l] = n.Alias
 	}
-	const advancedLabel = "Advanced: shared listener (one SNI for several foreign servers)"
-	labels = append(labels, advancedLabel)
+	const advancedLabel = "Shared listener (one SNI for several foreign servers)"
+	if advanced {
+		labels = append(labels, advancedLabel)
+	}
 	var picked string
-	if err := survey.AskOne(&survey.Select{Message: "Which node to switch?", Options: labels}, &picked); err != nil {
+	msg := "Which node to switch?"
+	if advanced {
+		msg = "[Hub side] Which node to configure?"
+	}
+	if err := survey.AskOne(&survey.Select{Message: msg, Options: labels}, &picked); err != nil {
 		return
 	}
 	if picked == advancedLabel {
@@ -72,14 +86,18 @@ func runReverseIranMenu(cfg *config.AppConfig) {
 
 	if node.Reverse {
 		var choice string
-		_ = survey.AskOne(&survey.Select{
-			Message: fmt.Sprintf("Node %q is in reverse mode. What now?", alias),
-			Options: []string{
-				"Reconfigure (ports, SNI, front proxy)",
+		opts := []string{"Switch back to the normal mode", "Cancel"}
+		if advanced {
+			opts = []string{
+				"Reconfigure (ports, SNI, front proxy, pipes)",
 				"Show the nginx / HAProxy config for this node",
 				"Switch back to the normal mode",
 				"Cancel",
-			},
+			}
+		}
+		_ = survey.AskOne(&survey.Select{
+			Message: fmt.Sprintf("Node %q is in reverse mode. What now?", alias),
+			Options: opts,
 		}, &choice)
 		switch {
 		case strings.HasPrefix(choice, "Show"):
@@ -92,6 +110,7 @@ func runReverseIranMenu(cfg *config.AppConfig) {
 			}
 			commitReverse(cfg)
 			color.Yellow("    Also switch the foreign back: hedioum-tunnel reverse-foreign --forward")
+			color.Yellow("    (both sides remember their settings; to return: --resume, or the same menu entry)")
 			return
 		case strings.HasPrefix(choice, "Reconfigure"):
 		default:
@@ -99,18 +118,32 @@ func runReverseIranMenu(cfg *config.AppConfig) {
 		}
 	}
 
-	if len(node.ReverseListeners) > 0 {
+	if !advanced && len(node.ReverseListeners) == 0 {
+		// First switch: take the defaults (one TLS listener, the node's SNI). Everything
+		// can be changed afterwards in Advanced settings.
+		plan, tok, err := applyReverseIran(cfg, alias, nil, "", reverseOpts{})
+		if err != nil {
+			color.Red("[x] %v", err)
+			return
+		}
+		printReversePlan(alias, plan)
+		commitReverse(cfg)
+		color.HiGreen("\n━━━ Run this on the foreign server now ━━━")
+		fmt.Printf("hedioum-tunnel reverse-foreign --token %s\n", tok)
+		color.Yellow("(ports, SNI, front proxy and pipes: Advanced settings > [Hub side] Reverse nodes)")
+		return
+	}
+	if !advanced && len(node.ReverseListeners) > 0 {
 		var quick string
 		_ = survey.AskOne(&survey.Select{
-			Message: fmt.Sprintf("Node %q was in reverse mode before. What now?", alias),
+			Message: fmt.Sprintf("Node %q was in reverse mode before. Switch back with the saved settings?", alias),
 			Options: []string{
-				"Switch to reverse again with the saved settings (one step)",
-				"Reconfigure (ports, SNI, front proxy)",
+				"Yes: switch to reverse again (same ports, SNI, front proxy)",
 				"Cancel",
 			},
 		}, &quick)
 		switch {
-		case strings.HasPrefix(quick, "Switch to reverse"):
+		case strings.HasPrefix(quick, "Yes"):
 			opts := reverseOpts{ShareWith: resumeShareWith(cfg, alias)}
 			plan, tok, err := applyReverseIran(cfg, alias, nil, "", opts)
 			if err != nil {
@@ -123,7 +156,6 @@ func runReverseIranMenu(cfg *config.AppConfig) {
 			color.White("If it still has its reverse settings: hedioum-tunnel reverse-foreign --resume")
 			color.White("Otherwise: hedioum-tunnel reverse-foreign --token %s", tok)
 			return
-		case strings.HasPrefix(quick, "Reconfigure"):
 		default:
 			return
 		}
@@ -190,6 +222,21 @@ func runReverseIranMenu(cfg *config.AppConfig) {
 	}, &opts.Decoy)
 
 	askFrontProxy(cfg, node, overrides, &opts)
+
+	// Pipe range the foreign is told to keep open (carried in the pairing token).
+	defMin, defMax := node.MinConnections, node.MaxConnections
+	if defMin == 0 {
+		defMin = config.DefaultReverseConns
+	}
+	if defMax < defMin {
+		defMax = config.SuggestedReverseMaxFor(defMin)
+	}
+	if v, ok := askInt("Pipes the foreign always keeps open (minimum):", defMin); ok {
+		opts.MinPipes = v
+		if w, ok := askInt("Most pipes under load (maximum):", maxInt(defMax, v)); ok {
+			opts.MaxPipes = w
+		}
+	}
 
 	plan, tok, err := applyReverseIran(cfg, alias, overrides, "", opts)
 	if err != nil {
@@ -274,7 +321,8 @@ func runSharedAuthMenu(cfg *config.AppConfig) {
 	}
 }
 
-// runReverseForeignMenu switches the foreign to dial the hub, or back.
+// runReverseForeignMenu is the foreign's top-level reverse entry: switch to dial the
+// hub (paste a token once) and back. Hubs and pipe ranges are in Advanced settings.
 func runReverseForeignMenu(cfg *config.AppConfig) {
 	inReverse := len(cfg.ReverseTargets) > 0
 	if !inReverse && cfg.ReverseSaved != nil && (len(cfg.ReverseSaved.Targets) > 0 || len(cfg.ReverseSaved.Hubs) > 0) {
@@ -298,15 +346,9 @@ func runReverseForeignMenu(cfg *config.AppConfig) {
 		var choice string
 		_ = survey.AskOne(&survey.Select{
 			Message: "What now?",
-			Options: []string{"Add another hub (dial a second Iran server)", "Hubs: show / change pipe range / remove", "Switch back to the normal mode", "Paste a new reverse token", "Cancel"},
+			Options: []string{"Switch back to the normal mode", "Paste a new reverse token", "Cancel"},
 		}, &choice)
 		switch {
-		case strings.HasPrefix(choice, "Add another"):
-			addHubMenu(cfg)
-			return
-		case strings.HasPrefix(choice, "Hubs:"):
-			manageHubsMenu(cfg)
-			return
 		case strings.HasPrefix(choice, "Switch back"):
 			if err := applyForwardForeign(cfg); err != nil {
 				color.Red("[x] %v", err)
@@ -314,6 +356,7 @@ func runReverseForeignMenu(cfg *config.AppConfig) {
 			}
 			commitReverse(cfg)
 			color.Yellow("    Also on the hub: switch the node back to the normal mode.")
+			color.Yellow("    (The reverse settings are remembered: this same entry switches back in one step.)")
 			return
 		case strings.HasPrefix(choice, "Paste"):
 		default:
@@ -332,13 +375,9 @@ func runReverseForeignMenu(cfg *config.AppConfig) {
 	if token == "" {
 		return
 	}
-	connsStr := "12"
-	_ = survey.AskOne(&survey.Input{Message: "Pipes to keep open to the hub:", Default: "12"}, &connsStr)
-	conns, err := strconv.Atoi(strings.TrimSpace(connsStr))
-	if err != nil || conns < 1 {
-		color.Red("[x] Pipes must be a positive number.")
-		return
-	}
+	// The pipe range comes from the token (the hub sets it); change it later under
+	// Advanced settings > [Foreign side] Reverse hubs.
+	conns := 0
 	keep := false
 	_ = survey.AskOne(&survey.Confirm{
 		Message: "Also keep the normal inbound listeners? (No = dial-out only, no open ports)",
@@ -538,4 +577,11 @@ func showFrontProxyConfig(node *config.ForeignNode) {
 		fmt.Println()
 		fmt.Println(out)
 	}
+}
+
+func maxInt(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
 }

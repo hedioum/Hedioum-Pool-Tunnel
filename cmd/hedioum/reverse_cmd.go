@@ -300,6 +300,9 @@ type reverseOpts struct {
 	// front-proxy settings), so one SNI carries several foreign servers. It needs the
 	// advanced shared_reverse_auth setting; the hub then tells the nodes apart by token.
 	ShareWith string
+	// MinPipes / MaxPipes set the node's pipe range (0 keeps it). The range is also put
+	// in the pairing token, so the foreign opens that many pipes without being told.
+	MinPipes, MaxPipes int
 }
 
 func validDecoyStyle(s string) error {
@@ -423,7 +426,30 @@ func applyReverseIran(cfg *config.AppConfig, alias string, overrides map[string]
 	if len(adv) > 0 && !isLoopbackBind(node.ReverseBind) {
 		plan.Warnings = append(plan.Warnings, "a front proxy is in use but the listeners are still reachable directly; --bind 127.0.0.1 keeps them behind the proxy")
 	}
-	tok := pairing.Encode(pairing.Token{ExitIP: ip, AuthKey: node.AuthToken, SNI: plan.SNI, Endpoints: advertised, Reverse: true})
+	if opts.MinPipes > 0 || opts.MaxPipes > 0 {
+		min, max := opts.MinPipes, opts.MaxPipes
+		if min == 0 {
+			min = node.MinConnections
+		}
+		if max == 0 {
+			max = node.MaxConnections
+		}
+		if min == 0 {
+			min = config.DefaultReverseConns
+		}
+		if max == 0 || max < min {
+			max = config.SuggestedReverseMaxFor(min)
+		}
+		if err := validPipeRange(min, max); err != nil {
+			return reversePlan{}, "", fmt.Errorf("pipes: %v", err)
+		}
+		node.MinConnections, node.MaxConnections = min, max
+	}
+	pt := pairing.Token{ExitIP: ip, AuthKey: node.AuthToken, SNI: plan.SNI, Endpoints: advertised, Reverse: true}
+	if node.MinConnections > 0 && node.MaxConnections >= node.MinConnections {
+		pt.MinConns, pt.MaxConns = node.MinConnections, node.MaxConnections
+	}
+	tok := pairing.Encode(pt)
 	return plan, tok, nil
 }
 
@@ -573,7 +599,7 @@ func applyReverseForeign(cfg *config.AppConfig, token string, conns int, keep bo
 	if conns < 0 {
 		return 0, false, fmt.Errorf("--conns must be positive")
 	}
-	if len(cfg.ReverseHubs) > 0 {
+	if len(cfg.ReverseHubs) > 1 {
 		return 0, false, fmt.Errorf("this foreign dials several hubs; manage them with add-hub / edit-hub / remove-hub (or `reverse-foreign --forward` to reset)")
 	}
 	targets := reverseTargetsFromToken(pt)
@@ -584,8 +610,26 @@ func applyReverseForeign(cfg *config.AppConfig, token string, conns int, keep bo
 	if keyChanged {
 		cfg.AuthToken = pt.AuthKey
 	}
-	cfg.ReverseTargets = targets
-	cfg.ReverseConns = conns // 0 = default (applied on load)
+	// The pipe count: --conns wins, else the range the hub put in the token, else 12.
+	min, max := conns, conns
+	if conns == 0 && pt.MinConns > 0 && validPipeRange(pt.MinConns, pt.MaxConns) == nil {
+		min, max = pt.MinConns, pt.MaxConns
+	}
+	if len(cfg.ReverseHubs) == 1 || max > min {
+		name := "default"
+		if len(cfg.ReverseHubs) == 1 {
+			cur := cfg.ReverseHubs[0]
+			name = cur.Name
+			if min == 0 {
+				min, max = cur.MinConns, cur.MaxConns
+			}
+		}
+		cfg.ReverseHubs = []config.ReverseHub{{Name: name, Targets: targets, MinConns: min, MaxConns: max}}
+		cfg.SyncReverseCompat()
+	} else {
+		cfg.ReverseTargets = targets
+		cfg.ReverseConns = conns // 0 = default (applied on load)
+	}
 	cfg.ReverseOnly = !keep
 	cfg.ReverseSaved = nil
 	return len(targets), keyChanged, nil
@@ -682,6 +726,8 @@ func cmdReverseIran(args []string) {
 	shareWith := fs.String("share-with", "", "advanced: join this reverse node's listener (same port/SNI) instead of getting its own; needs `reverse-shared-auth --on`")
 	decoy := fs.String("decoy-style", "", "decoy shown to unauthorized probes: apache|directadmin (default: the node's, else the hub's)")
 	allMimics := fs.Bool("all-mimics", false, "open a listener for every mimic type of the node (default: one TLS listener; name extra types in --ports)")
+	minPipes := fs.Int("min-pipes", 0, "pipes the foreign always keeps open to this hub (put in the token; 0 = the node's range)")
+	maxPipes := fs.Int("max-pipes", 0, "most pipes the foreign opens under load (put in the token; 0 = the node's range)")
 	forward := fs.Bool("forward", false, "flip the node back to the normal mode (the hub dials the foreign); its reverse settings are remembered")
 	resume := fs.Bool("resume", false, "flip the node back to reverse mode with the settings it had (ports, SNI, front proxy); no other flag needed")
 	_ = fs.Parse(args)
@@ -729,7 +775,7 @@ func cmdReverseIran(args []string) {
 	if err != nil {
 		fail("--advertise-ports: %v", err)
 	}
-	opts := reverseOpts{SNI: *sni, Decoy: *decoy, Advertise: adv, ShareWith: *shareWith, AllTypes: *allMimics}
+	opts := reverseOpts{SNI: *sni, Decoy: *decoy, Advertise: adv, ShareWith: *shareWith, AllTypes: *allMimics, MinPipes: *minPipes, MaxPipes: *maxPipes}
 	if *resume {
 		opts.ShareWith = resumeShareWith(cfg, *alias)
 	}
