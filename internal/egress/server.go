@@ -14,6 +14,7 @@ import (
 	"github.com/hashicorp/yamux"
 	"github.com/hedioum/Hedioum-Pool-Tunnel/config"
 	"github.com/hedioum/Hedioum-Pool-Tunnel/internal/mimic"
+	"github.com/hedioum/Hedioum-Pool-Tunnel/internal/proxyproto"
 	"github.com/hedioum/Hedioum-Pool-Tunnel/internal/securestream"
 	"github.com/hedioum/Hedioum-Pool-Tunnel/internal/sysutil"
 	"github.com/hedioum/Hedioum-Pool-Tunnel/internal/tlscert"
@@ -98,6 +99,10 @@ func startHTTPServer(port int, certMgr *tlscert.CertManager, cfg *config.AppConf
 	}
 }
 
+// proxyHeaderTimeout bounds how long a connection from the front proxy may take to send
+// its PROXY header.
+const proxyHeaderTimeout = 5 * time.Second
+
 // startMimicListener binds one port and serves it with the given mimic.
 func startMimicListener(cfg *config.AppConfig, ml config.MimicListener, filter *securestream.ReplayFilter, certMgr *tlscert.CertManager) {
 	m, err := buildServerMimic(cfg, ml, filter, certMgr)
@@ -106,21 +111,45 @@ func startMimicListener(cfg *config.AppConfig, ml config.MimicListener, filter *
 		return
 	}
 
-	// Dual-stack listen (":port") so an Iran hub can reach us over IPv4 or IPv6.
-	listenAddr := fmt.Sprintf(":%d", ml.Port)
+	// Dual-stack listen (":port") so an Iran hub can reach us over IPv4 or IPv6, unless this
+	// listener sits behind a front proxy (cfg.ListenBind, e.g. 127.0.0.1). Only the mimic
+	// types chosen for the proxy are bound to it; the others, and the SSH mimic (a proxy
+	// cannot route SSH, there is no SNI), keep their public port.
+	proxied := cfg.FrontProxied(ml.Type)
+	bind := ""
+	if proxied {
+		bind = cfg.ListenBind
+	}
+	listenAddr := net.JoinHostPort(bind, strconv.Itoa(ml.Port))
 	listener, err := net.Listen("tcp", listenAddr)
 	if err != nil {
 		slog.Error("failed to bind mimic listener", "type", ml.Type, "addr", listenAddr, "err", err)
 		return
 	}
-	slog.Info("mimic listener active", "type", ml.Type, "addr", listenAddr)
+	// Behind a front proxy that sends the PROXY protocol, take the real client address
+	// from its header and drop anything that did not come through the proxy. Listeners
+	// that are not behind the proxy are left alone.
+	requireProxy := cfg.ProxyProtocol && proxied
+	slog.Info("mimic listener active", "type", ml.Type, "addr", listenAddr, "proxy_protocol", requireProxy)
 
 	for {
 		conn, err := listener.Accept()
 		if err != nil {
 			continue
 		}
-		go handleIncomingConnection(conn, m, ml.Type)
+		if !requireProxy {
+			go handleIncomingConnection(conn, m, ml.Type)
+			continue
+		}
+		go func(conn net.Conn) {
+			c, err := proxyproto.Accept(conn, proxyHeaderTimeout)
+			if err != nil {
+				slog.Debug("dropped a connection without a PROXY header", "type", ml.Type, "err", err)
+				conn.Close()
+				return
+			}
+			handleIncomingConnection(c, m, ml.Type)
+		}(conn)
 	}
 }
 
