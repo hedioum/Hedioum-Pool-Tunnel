@@ -67,7 +67,7 @@ func reverseIranMenu(cfg *config.AppConfig, advanced bool) {
 		labels = append(labels, l)
 		byLabel[l] = n.Alias
 	}
-	const advancedLabel = "Shared listener (one SNI for several foreign servers)"
+	advancedLabel := fmt.Sprintf("Shared listener (one SNI for several foreign servers)   [%s]", onOff(cfg.SharedReverseAuth))
 	if advanced {
 		labels = append(labels, advancedLabel)
 	}
@@ -110,7 +110,7 @@ func reverseNodeFlow(cfg *config.AppConfig, alias string, advanced bool) {
 		}, &choice)
 		switch {
 		case strings.HasPrefix(choice, "Show"):
-			showFrontProxyConfig(node)
+			hubProxyConfigForReverse(cfg, node)
 			return
 		case strings.HasPrefix(choice, "Switch back"):
 			if err := applyForwardIran(cfg, alias); err != nil {
