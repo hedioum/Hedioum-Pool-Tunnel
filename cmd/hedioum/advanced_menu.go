@@ -89,16 +89,19 @@ func runHubAdvancedMenu(cfg *config.AppConfig) {
 		fwdOn, _ := countWhere(cfg, func(n config.ForeignNode) bool { return !n.Reverse && nodeBehindProxy(n) })
 		revOn, _ := countWhere(cfg, func(n config.ForeignNode) bool { return n.Reverse && len(n.ReverseAdvertise) > 0 })
 		optNormal := fmt.Sprintf("Front proxy (nginx / HAProxy) for normal nodes   [%d node(s) behind a proxy]", fwdOn)
-		optReverse := fmt.Sprintf("Front proxy (nginx / HAProxy) for reverse nodes  [%d node(s) behind a proxy]", revOn)
-		optShared := fmt.Sprintf("Shared reverse listener (several foreign servers on one SNI)   [%s]", onOff(cfg.SharedReverseAuth))
+		optReverse := fmt.Sprintf("[Hub side] Front proxy (nginx / HAProxy) for reverse nodes  [%d node(s) behind a proxy]", revOn)
+		optShared := fmt.Sprintf("[Hub side] Shared reverse listener (several foreign servers on one SNI)   [%s]", onOff(cfg.SharedReverseAuth))
+		optRevCfg := "[Hub side] Reverse nodes: ports, SNI, decoy, pipes, front proxy of a node"
 		var choice string
 		if err := survey.AskOne(&survey.Select{
 			Message: "Advanced settings (everything here is off unless you turn it on):",
-			Options: []string{optNormal, optReverse, optShared, "Back"},
+			Options: []string{optRevCfg, optNormal, optReverse, optShared, "Back"},
 		}, &choice); err != nil || choice == "Back" {
 			return
 		}
 		switch choice {
+		case optRevCfg:
+			runReverseIranAdvanced(cfg)
 		case optNormal:
 			hubProxyForwardNode(cfg)
 		case optReverse:
@@ -292,7 +295,7 @@ func runForeignAdvancedMenu(cfg *config.AppConfig) {
 		optProxy := fmt.Sprintf("Front proxy (nginx / HAProxy shares a port such as 443)   [%s]", onOff(foreignProxyOn(cfg)))
 		optSource := "Share an SNI with a real service: proxy config routed by the hub's IP"
 		optToken := "Pairing token for the hub (with the proxy's public port)"
-		optHubs := fmt.Sprintf("Reverse hubs: add another hub / pipe range / remove   [%d hub(s)]", len(cfg.EffectiveReverseHubs()))
+		optHubs := fmt.Sprintf("[Foreign side] Reverse hubs: add another hub / pipe range / remove   [%d hub(s)]", len(cfg.EffectiveReverseHubs()))
 		optUp := fmt.Sprintf("Outgoing traffic: direct, or hand it to a local SOCKS5 proxy   [%s]", upstreamLabel(cfg))
 		options := []string{optProxy, optSource, optToken, optUp}
 		if len(cfg.ReverseTargets) > 0 {

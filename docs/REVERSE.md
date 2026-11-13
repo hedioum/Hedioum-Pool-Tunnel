@@ -50,6 +50,24 @@ hedioum-tunnel reverse-iran --alias DE-01 --forward     # on the hub
 hedioum-tunnel reverse-foreign --forward                # on the foreign
 ```
 
+Both sides **remember** their reverse settings (hub: listener ports, SNI, bind, PROXY
+protocol, advertised ports, shared listener; foreign: hubs, pipe range, dial-out only), so
+switching again is one command with no token and no other flag:
+
+```
+hedioum-tunnel reverse-iran --alias DE-01 --resume      # on the hub
+hedioum-tunnel reverse-foreign --resume                 # on the foreign
+```
+
+The menus do the same: the top-level entry switches a node (the first time with the
+defaults), and ports, SNI, decoy, pipes, front proxy, sharing and extra hubs are under
+**Advanced settings**, labelled *[Hub side]* and *[Foreign side]*.
+
+**Pipe range.** The hub puts its node's pipe range (`--min-pipes` / `--max-pipes`, default
+the node's own) in the reverse token, so the foreign opens that many pipes without any
+flag. `reverse-foreign --conns N` still overrides it, and tokens from older versions
+(no range) keep the default of 12.
+
 ## Details
 
 - **Mimics.** By default the hub opens **one** listener, the `tls` mimic (port 443 when it

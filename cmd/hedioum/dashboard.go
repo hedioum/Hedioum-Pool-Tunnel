@@ -41,7 +41,7 @@ func runInteractiveDashboard(cfg *config.AppConfig) {
 				"9. Check This Server's IP Reputation",
 				"10. Restart the Service (reset all pools)",
 				"11. Reverse Tunnel: Switch a Node Normal <-> Reverse",
-				"12. Advanced Settings (front proxy such as nginx on 443, shared listeners)",
+				"12. Advanced Settings (reverse ports/SNI/pipes, front proxy such as nginx on 443, shared listeners)",
 			)
 		} else {
 			options = append(options,
@@ -51,7 +51,7 @@ func runInteractiveDashboard(cfg *config.AppConfig) {
 				"6. Restart the Service",
 				"7. Reverse Mode: Dial the Hub (when the hub can't reach this server)",
 				"8. Front Proxy: share a port such as 443 with nginx / HAProxy",
-				"9. Advanced Settings (front proxy, pairing token, reverse hubs)",
+				"9. Advanced Settings (front proxy and which mimics, pairing token, reverse hubs)",
 			)
 		}
 

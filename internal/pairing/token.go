@@ -29,6 +29,11 @@ type Token struct {
 	// out to. Absent (false) for the usual foreign-printed token, so old tokens decode
 	// unchanged.
 	Reverse bool `json:"rev,omitempty"`
+	// MinConns / MaxConns are the pipe range the hub asks a reverse foreign to keep open
+	// (the hub's own node range), so the hub configures it and the foreign needs no flag.
+	// Absent in older tokens, which decode unchanged and keep the foreign's default.
+	MinConns int `json:"min,omitempty"`
+	MaxConns int `json:"max,omitempty"`
 }
 
 var legacyHex = regexp.MustCompile(`^[A-Fa-f0-9]{32}$`)
