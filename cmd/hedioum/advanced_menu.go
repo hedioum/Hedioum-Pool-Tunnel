@@ -88,15 +88,13 @@ func runHubAdvancedMenu(cfg *config.AppConfig) {
 	for {
 		fwdOn, _ := countWhere(cfg, func(n config.ForeignNode) bool { return !n.Reverse && nodeBehindProxy(n) })
 		revOn, _ := countWhere(cfg, func(n config.ForeignNode) bool { return n.Reverse && len(n.ReverseAdvertise) > 0 })
-		optNormal := fmt.Sprintf("Front proxy (nginx / HAProxy) for normal nodes   [%d node(s) behind a proxy]", fwdOn)
-		optReverse := fmt.Sprintf("[Hub side] Front proxy (nginx / HAProxy) for reverse nodes  [%d node(s) behind a proxy]", revOn)
-		optShared := fmt.Sprintf("[Hub side] Shared reverse listener (several foreign servers on one SNI)   [%s]", onOff(cfg.SharedReverseAuth))
+		optNormal := fmt.Sprintf("[Hub side] Front proxy (nginx / HAProxy) for normal nodes   [%d node(s) behind a proxy]", fwdOn)
 		optRevOn := "[Hub side] Reverse mode: switch a node between normal and reverse (on / off)"
-		optRevCfg := "[Hub side] Reverse nodes: ports, SNI, decoy, pipes, front proxy of a node"
+		optRevCfg := fmt.Sprintf("[Hub side] Reverse nodes: ports, SNI, decoy, pipes, front proxy, shared listener   [%d behind a proxy]", revOn)
 		var choice string
 		if err := survey.AskOne(&survey.Select{
 			Message: "Advanced settings (everything here is off unless you turn it on):",
-			Options: []string{optRevOn, optRevCfg, optNormal, optReverse, optShared, "Back"},
+			Options: []string{optRevOn, optRevCfg, optNormal, "Back"},
 		}, &choice); err != nil || choice == "Back" {
 			return
 		}
@@ -107,10 +105,6 @@ func runHubAdvancedMenu(cfg *config.AppConfig) {
 			runReverseIranAdvanced(cfg)
 		case optNormal:
 			hubProxyForwardNode(cfg)
-		case optReverse:
-			hubProxyReverseNode(cfg)
-		case optShared:
-			runSharedAuthMenu(cfg)
 		}
 	}
 }
@@ -196,67 +190,6 @@ func hubProxyForwardNode(cfg *config.AppConfig) {
 		}
 		color.Green("[✓] Node %q dials %s on port %d directly again.", alias, ty, port)
 		commitReverse(cfg)
-	}
-}
-
-// hubProxyReverseNode turns the front-proxy setting of a reverse node ON or OFF, or
-// shows the nginx / HAProxy configuration for it.
-func hubProxyReverseNode(cfg *config.AppConfig) {
-	var labels []string
-	byLabel := map[string]string{}
-	for _, n := range cfg.ForeignNodes {
-		if !n.Reverse {
-			continue
-		}
-		l := fmt.Sprintf("%s   [%s]", n.Alias, onOff(len(n.ReverseAdvertise) > 0))
-		labels = append(labels, l)
-		byLabel[l] = n.Alias
-	}
-	if len(labels) == 0 {
-		color.Yellow("\n[!] No reverse nodes yet. Switch one in Advanced settings > [Hub side] Reverse mode first.")
-		return
-	}
-	var picked string
-	if err := survey.AskOne(&survey.Select{Message: "Which reverse node?", Options: labels}, &picked); err != nil {
-		return
-	}
-	alias := byLabel[picked]
-	node := findNode(cfg, alias)
-	var act string
-	_ = survey.AskOne(&survey.Select{Message: "Front proxy for " + alias + ":", Options: []string{
-		"Turn ON / change (guided)", "Turn OFF (the foreign dials the listener ports directly)", "Show the nginx / HAProxy config", "Cancel",
-	}}, &act)
-	switch {
-	case strings.HasPrefix(act, "Turn ON"):
-		var opts reverseOpts
-		askFrontProxy(cfg, node, nil, &opts)
-		plan, tok, err := applyReverseIran(cfg, alias, nil, "", opts)
-		if err != nil {
-			color.Red("[x] %v", err)
-			return
-		}
-		printReversePlan(alias, plan)
-		commitReverse(cfg)
-		if len(node.ReverseAdvertise) > 0 {
-			color.HiCyan("\n━━━ Add this to nginx / HAProxy first ━━━")
-			showFrontProxyConfig(findNode(cfg, alias))
-		}
-		color.HiGreen("\n━━━ Run this on the foreign server now ━━━")
-		fmt.Printf("hedioum-tunnel reverse-foreign --token %s\n", tok)
-	case strings.HasPrefix(act, "Turn OFF"):
-		empty, pp := "", false
-		opts := reverseOpts{AdvertiseSet: true, Bind: &empty, ProxyProtocol: &pp}
-		plan, tok, err := applyReverseIran(cfg, alias, nil, "", opts)
-		if err != nil {
-			color.Red("[x] %v", err)
-			return
-		}
-		printReversePlan(alias, plan)
-		commitReverse(cfg)
-		color.HiGreen("\n━━━ Run this on the foreign server now (it must dial the listener ports) ━━━")
-		fmt.Printf("hedioum-tunnel reverse-foreign --token %s\n", tok)
-	case strings.HasPrefix(act, "Show"):
-		hubProxyConfigForReverse(cfg, node)
 	}
 }
 
