@@ -349,3 +349,19 @@ func TestFrontProxyRoutesSharedPortBySNIAndOthersByPort(t *testing.T) {
 		t.Fatal("a listener on the shared port is routed by SNI and must need one")
 	}
 }
+
+// Ports the operator already moved behind the proxy by hand are local ports: the public
+// port is derived from them instead of adding the offset a second time.
+func TestAutoFrontProxyKeepsHandMovedPorts(t *testing.T) {
+	cfg := multiMimicCfg()
+	cfg.ListenBind, cfg.ProxyProtocol = "127.0.0.1", true
+	cfg.Mimics[3].Port = 40143 // imap, moved by hand
+	cfg.Mimics[2].Port = 48443 // https-alt, moved by hand
+	if _, err := autoFrontProxy(cfg, []string{"imap", "https-alt"}, defaultFrontProxyOffset, true); err != nil {
+		t.Fatal(err)
+	}
+	if portOfType(cfg, "imap") != 40143 || cfg.AdvertisePorts["imap"] != 143 ||
+		portOfType(cfg, "https-alt") != 48443 || cfg.AdvertisePorts["https-alt"] != 8443 {
+		t.Fatalf("hand-moved ports must be kept: %+v %+v", cfg.Mimics, cfg.AdvertisePorts)
+	}
+}
