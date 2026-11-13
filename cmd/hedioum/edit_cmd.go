@@ -282,11 +282,9 @@ func cmdEditForeign(args []string) {
 	cfg.DecoyStyle = *decoyStyle
 	cfg.EgressIPMode = *egressMode
 	cfg.EgressBindIP = *bindIP
-	hd := *httpDecoyPort
-	if hd == 0 {
-		hd = -1 // sentinel: disabled (0 would be re-defaulted to 80 on load)
-	} else if err := validPort(hd); err != nil {
-		fail("--http-decoy-port: %v", err)
+	hd, herr := normalizeHTTPDecoyPort(*httpDecoyPort)
+	if herr != nil {
+		fail("--http-decoy-port: %v", herr)
 	}
 	cfg.HTTPDecoyPort = hd
 	cfg.AuthToken = newToken
@@ -491,4 +489,17 @@ func firstEndpointSNI(node config.ForeignNode) string {
 		}
 	}
 	return ""
+}
+
+// normalizeHTTPDecoyPort maps the --http-decoy-port flag to the stored value. The flag
+// defaults to the saved value, so a decoy that is already disabled (stored as -1, because
+// 0 would be re-defaulted to 80 on load) comes back as -1 and must stay valid.
+func normalizeHTTPDecoyPort(hd int) (int, error) {
+	if hd <= 0 {
+		return -1, nil // disabled
+	}
+	if err := validPort(hd); err != nil {
+		return 0, err
+	}
+	return hd, nil
 }
