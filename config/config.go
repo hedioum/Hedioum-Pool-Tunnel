@@ -49,9 +49,37 @@ type AppConfig struct {
 	// Mimics lists the camouflage listeners the foreign runs (SSH, TLS, ...). If
 	// empty, a single SSH listener is synthesized from ForeignListenPort/DecoyPort.
 	Mimics []MimicListener `json:"mimics,omitempty"`
+	// ListenBind is the address the mimic listeners bind to ("" = all interfaces). Use
+	// "127.0.0.1" when a front proxy (nginx stream, HAProxy) owns the public port and
+	// forwards the tunnel's SNI to the listener.
+	ListenBind string `json:"listen_bind,omitempty"`
+	// ProxyProtocol makes the TLS-family mimic listeners require a PROXY protocol header
+	// (v1 or v2), as sent by a front proxy with `proxy_protocol on` (nginx) / `send-proxy`
+	// (HAProxy). Connections without one are dropped, so use it with a loopback ListenBind.
+	ProxyProtocol bool `json:"proxy_protocol,omitempty"`
+	// AdvertisePorts maps a mimic type to the public port a hub should dial when it
+	// differs from the port the listener binds (a front proxy listens on 443 and forwards
+	// to the listener). Used for the pairing token and the hub commands.
+	AdvertisePorts map[string]int `json:"advertise_ports,omitempty"`
 
 	// Iran Node specific properties
 	ForeignNodes []ForeignNode `json:"foreign_nodes,omitempty"`
+}
+
+// FrontProxied reports whether the listener of a mimic type sits behind the front proxy:
+// bound to ListenBind and, when ProxyProtocol is set, requiring the PROXY header. When
+// AdvertisePorts names types, only those are behind the proxy and every other listener
+// stays public as usual; when it names none, the older rule applies and every non-SSH
+// listener follows ListenBind / ProxyProtocol. SSH has no SNI, so it is never proxied.
+func (c *AppConfig) FrontProxied(ty string) bool {
+	if ty == "ssh" {
+		return false
+	}
+	if len(c.AdvertisePorts) > 0 {
+		_, ok := c.AdvertisePorts[ty]
+		return ok
+	}
+	return c.ListenBind != "" || c.ProxyProtocol
 }
 
 // MimicListener is one camouflage listener on the foreign node.
