@@ -81,3 +81,34 @@ func TestTLSAuthReplayRejected(t *testing.T) {
 		t.Fatal("replayed nonce must be rejected")
 	}
 }
+
+func TestServerVerifyTLSAnyPicksMatchingToken(t *testing.T) {
+	var fp [32]byte
+	fp[0] = 7
+	tokens := []string{"token-a", "token-b", "token-c"}
+	for want, tok := range tokens {
+		c1, c2 := net.Pipe()
+		errCh := make(chan error, 1)
+		go func() { errCh <- clientProveTLS(c1, tok, fp) }()
+		got, err := serverVerifyTLSAny(c2, c2, tokens, fp, nil)
+		if err != nil || got != want {
+			t.Fatalf("token %q: got index %d err %v, want %d", tok, got, err, want)
+		}
+		if err := <-errCh; err != nil {
+			t.Fatalf("client rejected the ack for %q: %v", tok, err)
+		}
+		c1.Close()
+		c2.Close()
+	}
+}
+
+func TestServerVerifyTLSAnyRejectsUnknownToken(t *testing.T) {
+	var fp [32]byte
+	c1, c2 := net.Pipe()
+	defer c1.Close()
+	defer c2.Close()
+	go func() { _ = clientProveTLS(c1, "stranger", fp) }()
+	if got, err := serverVerifyTLSAny(c2, c2, []string{"token-a", "token-b"}, fp, nil); err == nil || got != -1 {
+		t.Fatalf("unknown token accepted: index %d err %v", got, err)
+	}
+}

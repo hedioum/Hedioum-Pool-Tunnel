@@ -189,6 +189,13 @@ func cmdEditForeign(args []string) {
 	httpDecoyPort := fs.Int("http-decoy-port", cfg.HTTPDecoyPort, "plaintext web decoy port (0 disables)")
 	token := fs.String("token", "", "set a specific new auth token (default: keep current)")
 	rotateToken := fs.Bool("rotate-token", false, "generate a fresh auth token")
+	portsSpec := fs.String("ports", "", "set listener ports as TYPE=PORT,... (any mimic type)")
+	bind := fs.String("bind", cfg.ListenBind, "address the listeners bind to (127.0.0.1 behind a front proxy; '' = all interfaces)")
+	proxyProto := fs.Bool("proxy-protocol", cfg.ProxyProtocol, "require a PROXY protocol header from a front proxy (nginx proxy_protocol on / HAProxy send-proxy)")
+	fpAuto := fs.String("front-proxy-auto", "", "put these mimic types behind the front proxy in one step (comma list, or 'all'): each keeps its public port and listens locally on public+offset on 127.0.0.1")
+	fpOffset := fs.Int("front-proxy-offset", defaultFrontProxyOffset, "with --front-proxy-auto: local port = public port + this (8443 -> 48443)")
+	fpOff := fs.String("front-proxy-off", "", "take these mimic types out from behind the front proxy (comma list): they go back to their public port")
+	advertise := fs.String("advertise-ports", formatTypePorts(cfg.AdvertisePorts), "public ports a hub should dial as TYPE=PORT,... when a front proxy forwards them to the listeners")
 	_ = fs.Parse(args)
 	setFlags := map[string]bool{}
 	fs.Visit(func(f *flag.Flag) { setFlags[f.Name] = true })
@@ -254,6 +261,13 @@ func cmdEditForeign(args []string) {
 	for _, ty := range []string{"https-alt", "docker", "grafana", "prometheus", "cpanel", "whm", "webmail", "postgres", "mysql"} {
 		portMap[ty] = ports[ty]
 	}
+	if ov, perr := parseTypePortList(*portsSpec); perr != nil {
+		fail("--ports: %v", perr)
+	} else {
+		for ty, p := range ov {
+			portMap[ty] = p
+		}
+	}
 	for label, p := range portMap {
 		if err := validPort(p); err != nil {
 			fail("--%s-port: %v", label, err)
@@ -268,14 +282,38 @@ func cmdEditForeign(args []string) {
 	cfg.DecoyStyle = *decoyStyle
 	cfg.EgressIPMode = *egressMode
 	cfg.EgressBindIP = *bindIP
-	hd := *httpDecoyPort
-	if hd == 0 {
-		hd = -1 // sentinel: disabled (0 would be re-defaulted to 80 on load)
-	} else if err := validPort(hd); err != nil {
-		fail("--http-decoy-port: %v", err)
+	hd, herr := normalizeHTTPDecoyPort(*httpDecoyPort)
+	if herr != nil {
+		fail("--http-decoy-port: %v", herr)
 	}
 	cfg.HTTPDecoyPort = hd
 	cfg.AuthToken = newToken
+
+	advMap, aerr := parseTypePortList(*advertise)
+	if aerr != nil {
+		fail("--advertise-ports: %v", aerr)
+	}
+	warns, perr := applyForeignFrontProxy(cfg, foreignProxyOpts{Bind: bind, ProxyProtocol: proxyProto, Advertise: advMap, AdvertiseSet: true})
+	if perr != nil {
+		fail("%v", perr)
+	}
+	for _, w := range warns {
+		color.Yellow("[!] %s", w)
+	}
+	if *fpOff != "" {
+		if err := removeFrontProxy(cfg, strings.Split(*fpOff, ",")); err != nil {
+			fail("--front-proxy-off: %v", err)
+		}
+	}
+	if *fpAuto != "" {
+		autoWarns, err := autoFrontProxy(cfg, strings.Split(*fpAuto, ","), *fpOffset, *proxyProto)
+		if err != nil {
+			fail("--front-proxy-auto: %v", err)
+		}
+		for _, w := range autoWarns {
+			color.Yellow("[!] %s", w)
+		}
+	}
 
 	if err := config.SaveConfig(cfg); err != nil {
 		fail("failed to save config: %v", err)
@@ -324,6 +362,7 @@ func cmdEditNode(args []string) {
 	imapsPort := fs.Int("imaps-port", ports["imaps"], "foreign IMAPS mimic port")
 	daPort := fs.Int("directadmin-port", ports["directadmin"], "foreign DirectAdmin mimic port")
 	tlsServerName := fs.String("tls-servername", firstEndpointSNI(*node), "TLS SNI (the foreign's domain, for a real cert)")
+	nodePorts := fs.String("ports", "", "set endpoint ports as TYPE=PORT,... (any mimic type, e.g. https-alt=443)")
 	socksPort := fs.Int("socks-port", node.LocalSocksPort, "local SOCKS5 bind port")
 	socksBind := fs.String("socks-bind", node.SocksBind, "SOCKS5 bind address (container veth IP / 0.0.0.0 for LAN clients; trusted networks only)")
 	minC := fs.Int("min", node.MinConnections, "min warm-up connections")
@@ -389,6 +428,13 @@ func cmdEditNode(args []string) {
 	for _, ty := range []string{"https-alt", "docker", "grafana", "prometheus", "cpanel", "whm", "webmail", "postgres", "mysql"} {
 		portMap[ty] = ports[ty]
 	}
+	if ov, perr := parseTypePortList(*nodePorts); perr != nil {
+		fail("--ports: %v", perr)
+	} else {
+		for ty, p := range ov {
+			portMap[ty] = p
+		}
+	}
 	for label, p := range portMap {
 		if err := validPort(p); err != nil {
 			fail("--%s-port: %v", label, err)
@@ -403,22 +449,28 @@ func cmdEditNode(args []string) {
 	}
 
 	cfg.UpdateForeignNode(config.ForeignNode{
-		Alias:               alias,
-		LocalSocksPort:      *socksPort,
-		SocksBind:           *socksBind,
-		AuthToken:           newToken,
-		Endpoints:           buildEndpoints(*targetIP, types, portMap, *tlsServerName),
-		TunEnabled:          tunEnabled,
-		TunName:             tName,
-		TunAddr:             tAddr,
-		DNSEnabled:          *dns,
-		GatewayEnabled:      *gateway,
-		GatewayIface:        *gatewayIface,
-		GatewayLAN:          gatewayLANs,
-		MinConnections:      *minC,
-		MaxConnections:      *maxC,
-		BandwidthLimitMbps:  *bw,
-		BandwidthJitterMbps: *jitter,
+		Alias:                alias,
+		LocalSocksPort:       *socksPort,
+		SocksBind:            *socksBind,
+		AuthToken:            newToken,
+		Endpoints:            buildEndpoints(*targetIP, types, portMap, *tlsServerName),
+		TunEnabled:           tunEnabled,
+		TunName:              tName,
+		TunAddr:              tAddr,
+		DNSEnabled:           *dns,
+		GatewayEnabled:       *gateway,
+		GatewayIface:         *gatewayIface,
+		GatewayLAN:           gatewayLANs,
+		MinConnections:       *minC,
+		MaxConnections:       *maxC,
+		BandwidthLimitMbps:   *bw,
+		BandwidthJitterMbps:  *jitter,
+		Reverse:              node.Reverse,
+		ReverseListeners:     node.ReverseListeners,
+		ReverseDecoyStyle:    node.ReverseDecoyStyle,
+		ReverseBind:          node.ReverseBind,
+		ReverseProxyProtocol: node.ReverseProxyProtocol,
+		ReverseAdvertise:     node.ReverseAdvertise,
 	})
 	if err := config.SaveConfig(cfg); err != nil {
 		fail("failed to save config: %v", err)
@@ -440,4 +492,17 @@ func firstEndpointSNI(node config.ForeignNode) string {
 		}
 	}
 	return ""
+}
+
+// normalizeHTTPDecoyPort maps the --http-decoy-port flag to the stored value. The flag
+// defaults to the saved value, so a decoy that is already disabled (stored as -1, because
+// 0 would be re-defaulted to 80 on load) comes back as -1 and must stay valid.
+func normalizeHTTPDecoyPort(hd int) (int, error) {
+	if hd <= 0 {
+		return -1, nil // disabled
+	}
+	if err := validPort(hd); err != nil {
+		return 0, err
+	}
+	return hd, nil
 }

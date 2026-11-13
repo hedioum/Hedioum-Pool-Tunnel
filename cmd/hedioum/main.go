@@ -131,18 +131,28 @@ func runDaemon(cfg *config.AppConfig) {
 
 // handleOpenFirewall opens the foreign egress listen port on the host firewall.
 // It is meant to run as a privileged, short-lived step before the sandboxed
-// daemon starts. The Iran hub listens only on 127.0.0.1, so it needs no rule.
+// daemon starts. A forward-mode Iran hub listens only on 127.0.0.1, so it needs no
+// rule; a reverse node's listener ports are opened too.
 func handleOpenFirewall() {
 	cfg, err := config.LoadConfig()
 	if err != nil {
 		color.Yellow("[-] open-firewall: no configuration yet (%v); nothing to do.", err)
 		return
 	}
-	if cfg.Role != "foreign" {
-		return
+	var ports []int
+	switch cfg.Role {
+	case "foreign":
+		if cfg.ReverseOnly {
+			return // dial-out only: this host listens on nothing
+		}
+		ports = firewallPorts(cfg)
+	case "iran":
+		// The hub listens only on loopback for SOCKS, but a reverse node also accepts
+		// the pipes its foreign dials in, on public ports.
+		ports = reverseFirewallPorts(cfg)
 	}
 
-	for _, port := range firewallPorts(cfg) {
+	for _, port := range ports {
 		backend, err := firewall.EnsurePortOpen(port)
 		switch {
 		case err != nil:
@@ -162,11 +172,27 @@ func handleOpenFirewall() {
 // gets a rule — not just the legacy SSH port. Falls back to the legacy port only
 // if Mimics is somehow empty.
 func firewallPorts(cfg *config.AppConfig) []int {
+	loopback := isLoopbackBind(cfg.ListenBind)
+	// onlyProxied: behind a loopback front proxy every TLS listener is reachable only
+	// through it, so the host opens nothing for them (nor for the HTTP decoy).
+	onlyProxied := loopback
 	ports := make([]int, 0, len(cfg.Mimics))
 	for _, ml := range cfg.Mimics {
+		// A listener behind the front proxy is only reachable through it, so nothing is
+		// opened for it. Others (and the SSH mimic, which is never bound to the proxy
+		// address) keep their public rule.
+		if loopback && cfg.FrontProxied(ml.Type) {
+			continue
+		}
+		if ml.Type != "ssh" {
+			onlyProxied = false
+		}
 		if ml.Port != 0 {
 			ports = append(ports, ml.Port)
 		}
+	}
+	if onlyProxied {
+		return ports
 	}
 	if len(ports) == 0 {
 		port := cfg.ForeignListenPort

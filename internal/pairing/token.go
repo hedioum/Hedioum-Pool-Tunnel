@@ -24,6 +24,16 @@ type Token struct {
 	Persona   string         `json:"persona,omitempty"` // informational: the persona the foreign wears
 	SNI       string         `json:"sni,omitempty"`     // TLS SNI/CN the hub should present ("" = self-signed)
 	Endpoints map[string]int `json:"eps"`               // mimic type -> public port the foreign listens on
+	// Reverse marks a REVERSE-tunnel token printed by the hub: ExitIP is then the HUB's
+	// address and Endpoints are the ports the hub listens on, which the foreign dials
+	// out to. Absent (false) for the usual foreign-printed token, so old tokens decode
+	// unchanged.
+	Reverse bool `json:"rev,omitempty"`
+	// MinConns / MaxConns are the pipe range the hub asks a reverse foreign to keep open
+	// (the hub's own node range), so the hub configures it and the foreign needs no flag.
+	// Absent in older tokens, which decode unchanged and keep the foreign's default.
+	MinConns int `json:"min,omitempty"`
+	MaxConns int `json:"max,omitempty"`
 }
 
 var legacyHex = regexp.MustCompile(`^[A-Fa-f0-9]{32}$`)

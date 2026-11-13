@@ -12,6 +12,7 @@ import (
 	"github.com/hashicorp/yamux"
 	"github.com/hedioum/Hedioum-Pool-Tunnel/config"
 	"github.com/hedioum/Hedioum-Pool-Tunnel/internal/mimic"
+	"github.com/hedioum/Hedioum-Pool-Tunnel/internal/mimicfactory"
 )
 
 // hubYamuxConfig tunes Yamux for high-latency, high-throughput WAN links.
@@ -25,17 +26,7 @@ func hubYamuxConfig() *yamux.Config {
 
 // clientMimicFor builds the client camouflage for an endpoint's mimic type.
 func clientMimicFor(ep config.Endpoint, token string) mimic.ClientMimic {
-	switch ep.Mimic {
-	case "tls", "smtps", "imaps", "directadmin", "https-alt", "docker", "grafana", "prometheus",
-		"cpanel", "whm", "webmail":
-		// Implicit TLS: every panel/registry persona shares the plain TLS mimic on its
-		// own port (the disguise is server-side: the decoy shown to unauthorized probes).
-		return &mimic.TLSClient{Token: token, ServerName: ep.ServerName}
-	case "smtp", "imap", "postgres", "mysql":
-		return &mimic.StartTLSClient{Proto: ep.Mimic, TLS: &mimic.TLSClient{Token: token, ServerName: ep.ServerName}}
-	default: // "ssh"
-		return &mimic.SSHClient{Token: token}
-	}
+	return mimicfactory.Client(ep, token)
 }
 
 // DialEndpoint dials one endpoint: TCP connect, mimic handshake, Yamux client.
