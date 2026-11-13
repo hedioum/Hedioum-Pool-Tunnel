@@ -66,6 +66,22 @@ type AppConfig struct {
 	ForeignNodes []ForeignNode `json:"foreign_nodes,omitempty"`
 }
 
+// FrontProxied reports whether the listener of a mimic type sits behind the front proxy:
+// bound to ListenBind and, when ProxyProtocol is set, requiring the PROXY header. When
+// AdvertisePorts names types, only those are behind the proxy and every other listener
+// stays public as usual; when it names none, the older rule applies and every non-SSH
+// listener follows ListenBind / ProxyProtocol. SSH has no SNI, so it is never proxied.
+func (c *AppConfig) FrontProxied(ty string) bool {
+	if ty == "ssh" {
+		return false
+	}
+	if len(c.AdvertisePorts) > 0 {
+		_, ok := c.AdvertisePorts[ty]
+		return ok
+	}
+	return c.ListenBind != "" || c.ProxyProtocol
+}
+
 // MimicListener is one camouflage listener on the foreign node.
 type MimicListener struct {
 	Type       string `json:"type"`                  // "ssh" | "tls" | "smtp" | "imap"

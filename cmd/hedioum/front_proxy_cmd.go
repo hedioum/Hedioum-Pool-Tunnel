@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"flag"
 	"fmt"
 	"strings"
@@ -93,15 +94,26 @@ func cmdFrontProxy(args []string) {
 		fail("no foreign config (run this on the foreign server)")
 	}
 	sp, err := foreignFrontSpec(cfg)
-	if err != nil {
+	if err != nil && !errors.Is(err, errNoSNIListener) {
 		fail("%v", err)
 	}
+	fw := foreignDedicatedForwards(cfg)
 
 	color.HiCyan("# Front-proxy configuration (printed only; nothing was changed)\n")
-	if *kind == "haproxy" {
-		fmt.Println(haproxyFor(sp, *port))
-	} else {
-		fmt.Println(nginxFor(sp, *port))
+	if err == nil {
+		if *kind == "haproxy" {
+			fmt.Println(haproxyFor(sp, *port))
+		} else {
+			fmt.Println(nginxFor(sp, *port))
+		}
+		printHubHintForForeign(cfg, sp, *port)
 	}
-	printHubHintForForeign(cfg, sp, *port)
+	if len(fw) > 0 {
+		if *kind == "haproxy" {
+			fmt.Println(haproxyDedicated(fw, cfg.ProxyProtocol))
+		} else {
+			fmt.Println(nginxDedicated(fw, cfg.ProxyProtocol))
+		}
+		printDedicatedHubHint(fw)
+	}
 }
