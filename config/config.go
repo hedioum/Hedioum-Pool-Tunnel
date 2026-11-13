@@ -62,8 +62,123 @@ type AppConfig struct {
 	// to the listener). Used for the pairing token and the hub commands.
 	AdvertisePorts map[string]int `json:"advertise_ports,omitempty"`
 
+	// Reverse tunnel (foreign side). When ReverseTargets is set, this foreign node
+	// DIALS OUT to the Iran hub instead of waiting for the hub to dial in: it keeps
+	// ReverseConns authenticated pipes open to the hub's reverse listeners and serves
+	// the hub's streams over them. Useful when the hub->foreign direction is filtered
+	// (the foreign IP is "grey" for outbound handshakes from Iran) but foreign->Iran
+	// works. The hub still opens every logical stream, so egress behaviour is unchanged.
+	ReverseTargets []Endpoint `json:"reverse_targets,omitempty"`
+	// ReverseConns is how many pipes the foreign keeps open to the hub (default 12:
+	// 10 TCP + the 2 the hub dedicates to its UDP sub-pool).
+	ReverseConns int `json:"reverse_conns,omitempty"`
+	// ReverseOnly skips the foreign's inbound camouflage listeners entirely: no port
+	// is exposed, the node only dials out.
+	ReverseOnly bool `json:"reverse_only,omitempty"`
+	// ReverseHubs lets one foreign dial several Iran hubs, each with its own pipe
+	// range. When set it takes precedence over ReverseTargets/ReverseConns, which are
+	// then kept as the union of the hubs' targets and the sum of their minimums so an
+	// older binary still dials something sensible. Empty = the single hub described by
+	// ReverseTargets/ReverseConns (every config written before this field existed).
+	ReverseHubs []ReverseHub `json:"reverse_hubs,omitempty"`
+	// ReverseSaved holds the reverse settings of a foreign that was switched back to the
+	// normal mode, so one step (reverse-foreign --resume) restores them without a token.
+	ReverseSaved *ReverseSaved `json:"reverse_saved,omitempty"`
+
 	// Iran Node specific properties
 	ForeignNodes []ForeignNode `json:"foreign_nodes,omitempty"`
+
+	// SharedReverseAuth (advanced, hub, default off) lets several reverse nodes share
+	// one listener: nodes whose reverse listener has the same bind address, port, type
+	// and SNI are served by a single socket, and the hub tells them apart by which
+	// node token authenticates the handshake. Needed when one SNI (for example behind
+	// a front proxy that routes by SNI) has to carry several foreign servers. With it
+	// off every reverse node needs its own port, exactly as before.
+	SharedReverseAuth bool `json:"shared_reverse_auth,omitempty"`
+}
+
+// ReverseHub is one Iran hub a reverse foreign dials. The foreign is the side that
+// dials, so the pipe range lives here: it keeps at least MinConns pipes open to this
+// hub and opens more, up to MaxConns, while the hub's streams keep the pipes busy.
+// Bandwidth and jitter shaping stay on the hub's node (they apply to its sessions).
+type ReverseHub struct {
+	Name    string     `json:"name"`
+	Targets []Endpoint `json:"targets"`
+	// AuthToken is the node token this hub knows the foreign by. Empty = the foreign's
+	// own auth_token (the usual case: one token paired with every hub).
+	AuthToken string `json:"auth_token,omitempty"`
+	MinConns  int    `json:"min_conns,omitempty"` // pipes always kept open (default 12)
+	MaxConns  int    `json:"max_conns,omitempty"` // upper bound under load (default = MinConns, i.e. fixed)
+}
+
+// ReverseSaved is the foreign-side reverse configuration remembered while in normal mode.
+type ReverseSaved struct {
+	Hubs    []ReverseHub `json:"hubs,omitempty"`
+	Targets []Endpoint   `json:"targets,omitempty"`
+	Conns   int          `json:"conns,omitempty"`
+	Only    bool         `json:"only,omitempty"`
+}
+
+// DefaultReverseConns is the pipe count of a reverse hub when none is set: 10 TCP + the
+// 2 the hub dedicates to its UDP sub-pool.
+const DefaultReverseConns = 12
+
+// SuggestedReverseMax is the upper bound the menus propose for a reverse hub's pipe range.
+// It mirrors the "balanced" profile of a normal node (10 to 20 connections); the hub's own
+// max_connections for the node must be at least as large, or its extra pipes are refused.
+const SuggestedReverseMax = 20
+
+// SuggestedReverseMaxFor returns the maximum the menus propose for a hub whose minimum is min.
+func SuggestedReverseMaxFor(min int) int {
+	if min > SuggestedReverseMax {
+		return min
+	}
+	return SuggestedReverseMax
+}
+
+// EffectiveReverseHubs returns the hubs this foreign dials, with defaults applied:
+// ReverseHubs when set, else the single hub described by the legacy
+// ReverseTargets/ReverseConns fields (named "default").
+func (c *AppConfig) EffectiveReverseHubs() []ReverseHub {
+	var hubs []ReverseHub
+	if len(c.ReverseHubs) > 0 {
+		hubs = append(hubs, c.ReverseHubs...)
+	} else if len(c.ReverseTargets) > 0 {
+		hubs = []ReverseHub{{Name: "default", Targets: c.ReverseTargets, MinConns: c.ReverseConns, MaxConns: c.ReverseConns}}
+	}
+	for i := range hubs {
+		if hubs[i].MinConns < 1 {
+			hubs[i].MinConns = DefaultReverseConns
+		}
+		if hubs[i].MaxConns < hubs[i].MinConns {
+			hubs[i].MaxConns = hubs[i].MinConns
+		}
+		if hubs[i].AuthToken == "" {
+			hubs[i].AuthToken = c.AuthToken
+		}
+	}
+	return hubs
+}
+
+// SyncReverseCompat refreshes the legacy ReverseTargets/ReverseConns from ReverseHubs
+// (union of targets, sum of minimums). Call it after changing ReverseHubs.
+func (c *AppConfig) SyncReverseCompat() {
+	if len(c.ReverseHubs) == 0 {
+		return
+	}
+	var targets []Endpoint
+	seen := map[string]bool{}
+	conns := 0
+	for _, h := range c.EffectiveReverseHubs() {
+		conns += h.MinConns
+		for _, ep := range h.Targets {
+			if k := ep.Mimic + "|" + ep.Target; !seen[k] {
+				seen[k] = true
+				targets = append(targets, ep)
+			}
+		}
+	}
+	c.ReverseTargets, c.ReverseConns = targets, conns
 }
 
 // FrontProxied reports whether the listener of a mimic type sits behind the front proxy:
@@ -144,6 +259,37 @@ type ForeignNode struct {
 	BandwidthLimitMbps  int        `json:"bandwidth_limit_mbps"`  // Target speed (Mbps) per physical connection before scale-up
 	BandwidthJitterMbps int        `json:"bandwidth_jitter_mbps"` // Variance to evade DPI patterns (Chaos Mesh)
 	AuthToken           string     `json:"auth_token"`
+
+	// Reverse marks a node whose pipes are dialed BY the foreign (see
+	// AppConfig.ReverseTargets) instead of by this hub. The hub then runs one
+	// camouflage listener per ReverseListeners entry, authenticates the foreign with
+	// AuthToken, and adopts each accepted connection into this node's pool. Such a
+	// node has no Endpoints to dial.
+	Reverse          bool            `json:"reverse,omitempty"`
+	ReverseListeners []MimicListener `json:"reverse_listeners,omitempty"`
+	// ReverseDecoyStyle is the decoy persona ("apache" | "directadmin") the hub's reverse
+	// listeners show to unauthorized probes, so the hub looks like the foreign it
+	// stands in for. Empty = the hub's own decoy_style.
+	ReverseDecoyStyle string `json:"reverse_decoy_style,omitempty"`
+	// ReverseBind is the address the reverse listeners bind to ("" = all interfaces).
+	// Use "127.0.0.1" when a front proxy (nginx stream, HAProxy) owns the public port
+	// and forwards the tunnel's SNI to the listener.
+	ReverseBind string `json:"reverse_bind,omitempty"`
+	// ReverseProxyProtocol makes the reverse listeners require a PROXY protocol header
+	// (v1 or v2) on every connection, as sent by a front proxy that has
+	// `proxy_protocol on` (nginx) / `send-proxy` (HAProxy). Connections without one
+	// are dropped, so it should only be used together with a loopback ReverseBind.
+	ReverseProxyProtocol bool `json:"reverse_proxy_protocol,omitempty"`
+	// ReverseAdvertise maps a mimic type to the public port the foreign is told to dial
+	// when it differs from the port the listener binds (a front proxy listens on 443 and
+	// forwards to the listener). It is remembered so re-printing the token keeps it.
+	ReverseAdvertise map[string]int `json:"reverse_advertise_ports,omitempty"`
+	// ReverseShareWith is the alias of the node whose listener this one joined (advanced
+	// shared listener), remembered so switching back to reverse rejoins it.
+	ReverseShareWith string `json:"reverse_share_with,omitempty"`
+	// The Reverse* fields above are KEPT when the node is switched back to the normal
+	// mode (only Reverse is cleared), so switching to reverse again is one step with the
+	// same ports, SNI, front-proxy and decoy settings.
 }
 
 // getConfigPath determines the storage destination for the configuration.
@@ -201,7 +347,7 @@ func parseConfig(data []byte) (*AppConfig, error) {
 	}
 	// Synthesize a single SSH listener from the legacy fields if none configured,
 	// so v0.6 foreign configs keep working unchanged.
-	if cfg.Role == "foreign" && len(cfg.Mimics) == 0 {
+	if cfg.Role == "foreign" && len(cfg.Mimics) == 0 && !cfg.ReverseOnly {
 		port := cfg.ForeignListenPort
 		if port == 0 {
 			port = 22
@@ -213,15 +359,22 @@ func parseConfig(data []byte) (*AppConfig, error) {
 		}}
 	}
 
+	if cfg.Role == "foreign" {
+		cfg.SyncReverseCompat()
+	}
+	if cfg.Role == "foreign" && len(cfg.ReverseTargets) > 0 && cfg.ReverseConns == 0 {
+		cfg.ReverseConns = 12 // 10 TCP + 2 UDP, matching the hub's default sub-pool sizes
+	}
+
 	for i := range cfg.ForeignNodes {
-		if cfg.ForeignNodes[i].TargetPort == 0 {
+		if cfg.ForeignNodes[i].TargetPort == 0 && !cfg.ForeignNodes[i].Reverse {
 			cfg.ForeignNodes[i].TargetPort = 22 // Default fallback for old configs
 		}
 		if cfg.ForeignNodes[i].SocksBind == "" {
 			cfg.ForeignNodes[i].SocksBind = "127.0.0.1" // default: private to the host
 		}
 		// Synthesize a single SSH endpoint from the legacy target if none set.
-		if len(cfg.ForeignNodes[i].Endpoints) == 0 {
+		if len(cfg.ForeignNodes[i].Endpoints) == 0 && !cfg.ForeignNodes[i].Reverse {
 			cfg.ForeignNodes[i].Endpoints = []Endpoint{{
 				Target: net.JoinHostPort(cfg.ForeignNodes[i].TargetIP, strconv.Itoa(cfg.ForeignNodes[i].TargetPort)),
 				Mimic:  "ssh",

@@ -61,3 +61,29 @@ func TestValidation(t *testing.T) {
 		}
 	}
 }
+
+// A reverse token carries the hub's address and listener ports plus the rev flag, and
+// survives a round trip; a normal token decodes with Reverse == false (old tokens
+// are unaffected).
+func TestReverseTokenRoundTrip(t *testing.T) {
+	in := Token{
+		ExitIP:    "203.0.113.7",
+		AuthKey:   "0123456789abcdef0123456789abcdef",
+		SNI:       "example.org",
+		Endpoints: map[string]int{"tls": 443, "https-alt": 8443},
+		Reverse:   true,
+	}
+	got, isV2, err := Decode(Encode(in))
+	if err != nil || !isV2 {
+		t.Fatalf("decode: v2=%v err=%v", isV2, err)
+	}
+	if !got.Reverse || got.ExitIP != in.ExitIP || got.Endpoints["tls"] != 443 {
+		t.Fatalf("reverse token mangled: %+v", got)
+	}
+
+	in.Reverse = false
+	got, _, err = Decode(Encode(in))
+	if err != nil || got.Reverse {
+		t.Fatalf("normal token must decode with Reverse=false: %+v err=%v", got, err)
+	}
+}

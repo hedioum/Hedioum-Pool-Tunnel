@@ -22,14 +22,23 @@ func StartIranHub(cfg *config.AppConfig) {
 	for _, node := range cfg.ForeignNodes {
 		nodeCopy := node // local copy for the closure
 
-		// The dialer spreads new physical pipes across this node's endpoints with a
-		// fluctuating per-server mimic distribution (see dial.go).
-		dialer := newEndpointDialer(nodeCopy)
-		hubManager.RegisterNode(nodeCopy, dialer.dial)
+		if nodeCopy.Reverse {
+			// Reverse tunnel: the foreign dials in, so there is nothing to dial. The
+			// pools are fed by the reverse listeners started below.
+			hubManager.RegisterReverseNode(nodeCopy)
+		} else {
+			// The dialer spreads new physical pipes across this node's endpoints with a
+			// fluctuating per-server mimic distribution (see dial.go).
+			dialer := newEndpointDialer(nodeCopy)
+			hubManager.RegisterNode(nodeCopy, dialer.dial)
+		}
 
 		// Local SOCKS5 listener, strictly bound to localhost, for X-UI/Xray.
 		go startLocalSocksListener(nodeCopy, hubManager)
 	}
+
+	// Reverse-tunnel nodes: accept the pipes their foreign dials in.
+	startReverseListeners(cfg, hubManager)
 
 	// Bring up an OS-level TUN interface for every node that opted in. TUN mirrors
 	// the per-node SOCKS port: each enabled node gets its own interface + /24 and

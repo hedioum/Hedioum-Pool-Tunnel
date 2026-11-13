@@ -40,6 +40,7 @@ func runInteractiveDashboard(cfg *config.AppConfig) {
 				"8. Test Connection (full egress: exit IP, sites, DNS, TUN)",
 				"9. Check This Server's IP Reputation",
 				"10. Restart the Service (reset all pools)",
+				"11. Advanced Settings (reverse mode on/off and settings, front proxy such as nginx on 443, shared listeners)",
 			)
 		} else {
 			options = append(options,
@@ -47,7 +48,7 @@ func runInteractiveDashboard(cfg *config.AppConfig) {
 				"4. Rotate Authentication Token",
 				"5. Check Egress IP Reputation",
 				"6. Restart the Service",
-				"7. Advanced Settings (front proxy such as nginx on 443, pairing token)",
+				"7. Advanced Settings (reverse mode on/off, front proxy such as nginx on 443, pairing token, hubs)",
 			)
 		}
 
@@ -79,6 +80,9 @@ func runInteractiveDashboard(cfg *config.AppConfig) {
 					color.HiCyan("\n=== [ Active Mesh Topologies & Live Stats ] ===")
 					for _, n := range cfg.ForeignNodes {
 						fmt.Printf("\n 🟢 Target Alias : %s\n", color.HiWhiteString(n.Alias))
+						if n.Reverse {
+							fmt.Printf(" ├─ Mode         : %s (the foreign dials this hub)\n", color.HiYellowString("REVERSE"))
+						}
 						fmt.Printf(" ├─ Local SOCKS5 : 127.0.0.1:%d\n", n.LocalSocksPort)
 						if n.TunEnabled || n.GatewayEnabled {
 							dnsNote := ""
@@ -122,6 +126,9 @@ func runInteractiveDashboard(cfg *config.AppConfig) {
 					personaLabel = "custom"
 				}
 				fmt.Printf(" ├─ Persona     : %s (%d mimics)\n", personaLabel, len(cfg.Mimics))
+				if len(cfg.ReverseTargets) > 0 {
+					fmt.Printf(" ├─ Mode        : %s (dials %d hub(s), %d endpoint(s))\n", color.HiYellowString("REVERSE"), len(cfg.EffectiveReverseHubs()), len(cfg.ReverseTargets))
+				}
 				fmt.Printf(" ├─ Listen Port : %d\n", cfg.ForeignListenPort)
 				fmt.Printf(" └─ Auth Token  : %s\n", color.HiYellowString(cfg.AuthToken))
 				color.HiBlack("    (Use this token when configuring your Iran Hub)")
@@ -132,17 +139,39 @@ func runInteractiveDashboard(cfg *config.AppConfig) {
 			runInterruptible("journalctl", "-u", "hedioum.service", "-f", "-n", "30")
 
 		case strings.Contains(action, "Add New Foreign Egress Node"):
-			setupIranNode(cfg, false)
+			if cancellable(func() { setupIranNode(cfg, false) }) {
+				color.Yellow("\n[-] Cancelled; nothing was changed.")
+				continue
+			}
 			saveAndRestart(cfg)
 
 		case strings.Contains(action, "Edit Existing Egress Node"):
-			if node, ok := pickNode(cfg, "Select node to edit:"); ok {
-				editIranNode(cfg, node)
+			var restarted bool
+			var picked bool
+			if cancellable(func() {
+				node, ok := pickNode(cfg, "Select node to edit:")
+				if picked = ok; ok {
+					restarted = editIranNode(cfg, node)
+				}
+			}) {
+				color.Yellow("\n[-] Cancelled; nothing was changed.")
+				if cfg2, err := config.LoadConfig(); err == nil {
+					*cfg = *cfg2 // drop any half-applied in-memory edit
+				}
+				continue
+			}
+			if picked && !restarted {
 				saveAndRestart(cfg)
 			}
 
 		case strings.Contains(action, "Edit Foreign Configuration"):
-			editForeignConfig(cfg)
+			if cancellable(func() { editForeignConfig(cfg) }) {
+				color.Yellow("\n[-] Cancelled; nothing was changed.")
+				if cfg2, err := config.LoadConfig(); err == nil {
+					*cfg = *cfg2
+				}
+				continue
+			}
 			saveAndRestart(cfg)
 
 		case strings.Contains(action, "Remove Existing Egress Node"):
@@ -175,8 +204,12 @@ func runInteractiveDashboard(cfg *config.AppConfig) {
 		case strings.Contains(action, "IP Reputation"):
 			cmdCheckIP(nil)
 
-		case strings.Contains(action, "Advanced Settings (front proxy"):
-			runForeignAdvancedMenu(cfg)
+		case strings.Contains(action, "Advanced Settings ("):
+			if cfg.Role == "iran" {
+				runHubAdvancedMenu(cfg)
+			} else {
+				runForeignAdvancedMenu(cfg)
+			}
 
 		case strings.Contains(action, "Restart the Service"):
 			color.HiBlue("\n[*] Restarting hedioum.service (re-warms every pool)...")
@@ -240,14 +273,17 @@ func pickNode(cfg *config.AppConfig, prompt string) (config.ForeignNode, bool) {
 	if len(cfg.ForeignNodes) == 1 {
 		return cfg.ForeignNodes[0], true
 	}
-	var aliases []string
+	var labels []string
+	byLabel := map[string]string{}
 	for _, n := range cfg.ForeignNodes {
-		aliases = append(aliases, n.Alias)
+		l := fmt.Sprintf("%s  [%s]", n.Alias, nodeModeLabel(n))
+		labels = append(labels, l)
+		byLabel[l] = n.Alias
 	}
 	var selected string
-	survey.AskOne(&survey.Select{Message: prompt, Options: aliases}, &selected)
+	ask(&survey.Select{Message: prompt, Options: labels}, &selected)
 	for _, n := range cfg.ForeignNodes {
-		if n.Alias == selected {
+		if n.Alias == byLabel[selected] {
 			return n, true
 		}
 	}

@@ -153,6 +153,24 @@ func TestForeignProxyOnState(t *testing.T) {
 	}
 }
 
+// A hub-side proxy must send every node that shares the listener to the tunnel, taking
+// each node's address from its endpoints (TargetIP can be empty or stale).
+func TestNodeSourceIPsUseEndpointAddresses(t *testing.T) {
+	l := []config.MimicListener{{Type: "tls", Port: 9553, ServerName: "t.example.test"}}
+	a := config.ForeignNode{Alias: "a", TargetIP: "192.0.2.10", Reverse: true, ReverseListeners: l, ReverseBind: "127.0.0.1",
+		Endpoints: []config.Endpoint{{Target: "192.0.2.10:22", Mimic: "ssh"}}}
+	b := config.ForeignNode{Alias: "b", Reverse: true, ReverseListeners: l, ReverseBind: "127.0.0.1",
+		Endpoints: []config.Endpoint{{Target: "198.51.100.7:22", Mimic: "ssh"}}}
+	other := config.ForeignNode{Alias: "c", Reverse: true, ReverseBind: "127.0.0.1",
+		ReverseListeners: []config.MimicListener{{Type: "tls", Port: 9999}},
+		Endpoints:        []config.Endpoint{{Target: "203.0.113.5:22", Mimic: "ssh"}}}
+	cfg := &config.AppConfig{ForeignNodes: []config.ForeignNode{a, b, other}}
+	got := nodeSourceIPs(cfg, a)
+	if len(got) != 2 || got[0] != "192.0.2.10" || got[1] != "198.51.100.7" {
+		t.Fatalf("got %v, want both nodes of the shared listener and not the other one", got)
+	}
+}
+
 func multiMimicCfg() *config.AppConfig {
 	return &config.AppConfig{
 		Role: "foreign", AuthToken: "0123456789abcdef0123456789abcdef",
