@@ -16,6 +16,7 @@ import (
 
 // commitReverse saves the config and applies it to the running service.
 func commitReverse(cfg *config.AppConfig) {
+	commitCount++
 	if err := config.SaveConfig(cfg); err != nil {
 		color.Red("[x] Failed to save config: %v", err)
 		return
@@ -24,6 +25,10 @@ func commitReverse(cfg *config.AppConfig) {
 	restartDaemon()
 	color.Green("[✓] Saved; service restarted.")
 }
+
+// commitCount counts saves done by commitReverse, so a caller can tell whether a menu
+// flow already saved and restarted the service.
+var commitCount int
 
 // nodeModeLabel is the menu/status tag of a hub node.
 func nodeModeLabel(n config.ForeignNode) string {
@@ -78,7 +83,11 @@ func reverseIranMenu(cfg *config.AppConfig, advanced bool) {
 		runSharedAuthMenu(cfg)
 		return
 	}
-	alias := byLabel[picked]
+	reverseNodeFlow(cfg, byLabel[picked], advanced)
+}
+
+// reverseNodeFlow switches or configures one node (advanced = the full configuration).
+func reverseNodeFlow(cfg *config.AppConfig, alias string, advanced bool) {
 	node := findNode(cfg, alias)
 	if node == nil {
 		return
