@@ -296,6 +296,11 @@ func autoFrontProxy(cfg *config.AppConfig, types []string, offset int, proxyProt
 		pub, ok := adv[ty]
 		if !ok {
 			pub = m.Port
+			// A port the operator already moved behind the proxy by hand (for example
+			// 40143 for imap) is the LOCAL port: the public one is that minus the offset.
+			if m.Port > offset && (cfg.ListenBind != "" || cfg.ProxyProtocol || m.Port+offset > 65535) {
+				pub = m.Port - offset
+			}
 		}
 		local := pub + offset
 		if local > 65535 {
