@@ -47,6 +47,7 @@ func runInteractiveDashboard(cfg *config.AppConfig) {
 				"4. Rotate Authentication Token",
 				"5. Check Egress IP Reputation",
 				"6. Restart the Service",
+				"7. Advanced Settings (front proxy such as nginx on 443, pairing token)",
 			)
 		}
 
@@ -173,6 +174,9 @@ func runInteractiveDashboard(cfg *config.AppConfig) {
 
 		case strings.Contains(action, "IP Reputation"):
 			cmdCheckIP(nil)
+
+		case strings.Contains(action, "Advanced Settings (front proxy"):
+			runForeignAdvancedMenu(cfg)
 
 		case strings.Contains(action, "Restart the Service"):
 			color.HiBlue("\n[*] Restarting hedioum.service (re-warms every pool)...")

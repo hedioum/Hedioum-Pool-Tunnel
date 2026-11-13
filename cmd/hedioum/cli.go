@@ -29,6 +29,10 @@ func runSubcommand(name string, args []string) {
 		cmdRemoveNode(args)
 	case "edit-foreign":
 		cmdEditForeign(args)
+	case "front-proxy":
+		cmdFrontProxy(args)
+	case "pairing-token":
+		cmdPairingToken(args)
 	case "install":
 		cmdInstall(args)
 	case "uninstall":
@@ -79,6 +83,12 @@ Usage:
   hedioum-tunnel edit-node --alias NAME [flags]  Edit a node in place (only the flags
       you pass change; token kept unless --token/--rotate-token)
   hedioum-tunnel remove-node --alias NAME
+  hedioum-tunnel front-proxy [--kind nginx|haproxy] [--public-port 443]   (foreign)
+      Print the nginx/HAProxy config that routes the tunnel's SNI to this foreign's listener,
+      so the tunnel can share a port such as 443 with a panel or user configs. Pair it with
+      edit-foreign --advertise-ports TYPE=443 --bind 127.0.0.1 [--proxy-protocol]
+  hedioum-tunnel pairing-token [--public-ip IP]
+      (foreign) Print the paste-only pairing token for the hub, honoring --advertise-ports
   hedioum-tunnel speedtest [--node NAME] [--mimic ssh|tls] [--seconds N] [--dir down|up|both]
   hedioum-tunnel probe     [--node NAME]    Test each endpoint (mimic) and report reachability
   hedioum-tunnel check-ip                   Report the egress IP's reputation (clean vs flagged)
