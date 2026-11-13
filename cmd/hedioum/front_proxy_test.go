@@ -365,3 +365,16 @@ func TestAutoFrontProxyKeepsHandMovedPorts(t *testing.T) {
 		t.Fatalf("hand-moved ports must be kept: %+v %+v", cfg.Mimics, cfg.AdvertisePorts)
 	}
 }
+
+// A foreign whose HTTP decoy is disabled stores -1; editing anything else must not trip on it.
+func TestNormalizeHTTPDecoyPort(t *testing.T) {
+	for in, want := range map[int]int{-1: -1, 0: -1, 80: 80, 8080: 8080} {
+		got, err := normalizeHTTPDecoyPort(in)
+		if err != nil || got != want {
+			t.Errorf("normalizeHTTPDecoyPort(%d) = %d, %v; want %d", in, got, err, want)
+		}
+	}
+	if _, err := normalizeHTTPDecoyPort(70000); err == nil {
+		t.Error("an out-of-range port must be rejected")
+	}
+}
