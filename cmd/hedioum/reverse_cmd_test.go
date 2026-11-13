@@ -577,3 +577,21 @@ func TestPipeRangeTravelsInTheToken(t *testing.T) {
 		t.Fatalf("no range in the token: want the default, got %+v", h)
 	}
 }
+
+// Editing a node in the menu must not lose reverse settings (the shared listener included).
+func TestCommonEditsKeepReverseSettings(t *testing.T) {
+	n := config.ForeignNode{
+		Alias: "a", AuthToken: "old", Reverse: true, ReverseShareWith: "b", ReverseBind: "127.0.0.1",
+		ReverseProxyProtocol: true, ReverseAdvertise: map[string]int{"tls": 443},
+		ReverseListeners: []config.MimicListener{{Type: "tls", Port: 9553}},
+		Endpoints:        []config.Endpoint{{Target: "1.2.3.4:443", Mimic: "tls"}},
+	}
+	got := nodeWithCommonEdits(n, 40010, 6, 14, 0, 0, "new")
+	if got.MinConnections != 6 || got.MaxConnections != 14 || got.AuthToken != "new" || got.LocalSocksPort != 40010 {
+		t.Fatalf("edits not applied: %+v", got)
+	}
+	if !got.Reverse || got.ReverseShareWith != "b" || got.ReverseBind != "127.0.0.1" || !got.ReverseProxyProtocol ||
+		got.ReverseAdvertise["tls"] != 443 || len(got.ReverseListeners) != 1 || len(got.Endpoints) != 1 {
+		t.Fatalf("reverse settings lost: %+v", got)
+	}
+}

@@ -69,6 +69,10 @@ func promptTokenChange(current string) (string, bool) {
 // its current values, and updates it in place.
 func editIranNode(cfg *config.AppConfig, node config.ForeignNode) {
 	color.HiBlue("\n--- Edit Node %q (press Enter to keep the current value) ---\n", node.Alias)
+	if node.Reverse {
+		editReverseIranNode(cfg, node)
+		return
+	}
 	ports := currentNodePorts(node)
 
 	ip := promptStrDefault("Foreign Egress IP/host:", nodeTargetIP(node))
@@ -88,23 +92,42 @@ func editIranNode(cfg *config.AppConfig, node config.ForeignNode) {
 		color.Yellow("[!] New token: %s — update the foreign server to match.", tok)
 	}
 
-	cfg.UpdateForeignNode(config.ForeignNode{
-		Alias:                node.Alias,
-		LocalSocksPort:       socks,
-		AuthToken:            tok,
-		Endpoints:            buildEndpoints(ip, types, portMap, sni),
-		MinConnections:       minC,
-		MaxConnections:       maxC,
-		BandwidthLimitMbps:   bw,
-		BandwidthJitterMbps:  jit,
-		Reverse:              node.Reverse,
-		ReverseListeners:     node.ReverseListeners,
-		ReverseDecoyStyle:    node.ReverseDecoyStyle,
-		ReverseBind:          node.ReverseBind,
-		ReverseProxyProtocol: node.ReverseProxyProtocol,
-		ReverseAdvertise:     node.ReverseAdvertise,
-	})
+	n := nodeWithCommonEdits(node, socks, minC, maxC, bw, jit, tok)
+	n.Endpoints = buildEndpoints(ip, types, portMap, sni)
+	cfg.UpdateForeignNode(n)
 	color.Green("[✓] Node %q updated (target %s, mimics: %s).", node.Alias, ip, strings.Join(types, ","))
+}
+
+// nodeWithCommonEdits returns the node with the settings both modes share changed and
+// every other field (reverse listeners, front proxy, sharing...) left exactly as it was.
+func nodeWithCommonEdits(node config.ForeignNode, socks, minC, maxC, bw, jit int, tok string) config.ForeignNode {
+	node.LocalSocksPort = socks
+	node.MinConnections = minC
+	node.MaxConnections = maxC
+	node.BandwidthLimitMbps = bw
+	node.BandwidthJitterMbps = jit
+	node.AuthToken = tok
+	return node
+}
+
+// editReverseIranNode edits a node that is in reverse mode. The foreign's address,
+// mimic types and ports do not apply (the foreign dials the hub), so they are not asked;
+// the reverse listener, SNI, front proxy and sharing live in Advanced settings.
+func editReverseIranNode(cfg *config.AppConfig, node config.ForeignNode) {
+	color.Yellow("This node is in REVERSE mode: the foreign dials this hub, so the foreign's address,")
+	color.Yellow("mimics and ports are not used. Listener ports, SNI and front proxy: Advanced settings > [Hub side].\n")
+	socks := promptPortDefault("Local SOCKS5 bind port:", node.LocalSocksPort)
+	minC := promptIntDefault("Pipes kept open (minimum; also announced to the foreign in the next token):", node.MinConnections)
+	maxC := promptIntDefault("Most pipes under load (maximum):", node.MaxConnections)
+	bw := promptIntDefault("Per-connection Mbps cap:", node.BandwidthLimitMbps)
+	jit := promptIntDefault("Bandwidth jitter Mbps:", node.BandwidthJitterMbps)
+	tok, changed := promptTokenChange(node.AuthToken)
+	if changed {
+		color.Yellow("[!] New token: %s — update the foreign server to match.", tok)
+	}
+	cfg.UpdateForeignNode(nodeWithCommonEdits(node, socks, minC, maxC, bw, jit, tok))
+	color.Green("[✓] Node %q updated.", node.Alias)
+	color.Yellow("    The foreign applies the pipe range it was given; to change it there use its menu (Advanced > Reverse hubs) or paste a fresh token.")
 }
 
 // editForeignConfig re-asks each foreign setup question, pre-filled with the current
