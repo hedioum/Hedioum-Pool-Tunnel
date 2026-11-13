@@ -595,3 +595,29 @@ func TestCommonEditsKeepReverseSettings(t *testing.T) {
 		t.Fatalf("reverse settings lost: %+v", got)
 	}
 }
+
+// Ctrl+C inside a wizard cancels the whole wizard instead of being swallowed.
+func TestCancellableStopsTheWizard(t *testing.T) {
+	ran := false
+	if !cancellable(func() {
+		defer func() { ran = true }() // runs while unwinding, not after the panic point
+		panic(wizardCancelled{})
+	}) || !ran {
+		t.Fatal("a cancelled wizard must report it and stop")
+	}
+	if cancellable(func() {}) {
+		t.Fatal("a finished wizard is not cancelled")
+	}
+	if wizardDepth != 0 {
+		t.Fatalf("depth must return to 0, got %d", wizardDepth)
+	}
+	defer func() {
+		if recover() == nil {
+			t.Fatal("other panics must propagate")
+		}
+		if wizardDepth != 0 {
+			t.Fatalf("depth must return to 0 after a panic, got %d", wizardDepth)
+		}
+	}()
+	cancellable(func() { panic("boom") })
+}

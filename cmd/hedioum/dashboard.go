@@ -142,17 +142,39 @@ func runInteractiveDashboard(cfg *config.AppConfig) {
 			runInterruptible("journalctl", "-u", "hedioum.service", "-f", "-n", "30")
 
 		case strings.Contains(action, "Add New Foreign Egress Node"):
-			setupIranNode(cfg, false)
+			if cancellable(func() { setupIranNode(cfg, false) }) {
+				color.Yellow("\n[-] Cancelled; nothing was changed.")
+				continue
+			}
 			saveAndRestart(cfg)
 
 		case strings.Contains(action, "Edit Existing Egress Node"):
-			if node, ok := pickNode(cfg, "Select node to edit:"); ok {
-				editIranNode(cfg, node)
+			var restarted bool
+			var picked bool
+			if cancellable(func() {
+				node, ok := pickNode(cfg, "Select node to edit:")
+				if picked = ok; ok {
+					restarted = editIranNode(cfg, node)
+				}
+			}) {
+				color.Yellow("\n[-] Cancelled; nothing was changed.")
+				if cfg2, err := config.LoadConfig(); err == nil {
+					*cfg = *cfg2 // drop any half-applied in-memory edit
+				}
+				continue
+			}
+			if picked && !restarted {
 				saveAndRestart(cfg)
 			}
 
 		case strings.Contains(action, "Edit Foreign Configuration"):
-			editForeignConfig(cfg)
+			if cancellable(func() { editForeignConfig(cfg) }) {
+				color.Yellow("\n[-] Cancelled; nothing was changed.")
+				if cfg2, err := config.LoadConfig(); err == nil {
+					*cfg = *cfg2
+				}
+				continue
+			}
 			saveAndRestart(cfg)
 
 		case strings.Contains(action, "Remove Existing Egress Node"):
@@ -263,14 +285,17 @@ func pickNode(cfg *config.AppConfig, prompt string) (config.ForeignNode, bool) {
 	if len(cfg.ForeignNodes) == 1 {
 		return cfg.ForeignNodes[0], true
 	}
-	var aliases []string
+	var labels []string
+	byLabel := map[string]string{}
 	for _, n := range cfg.ForeignNodes {
-		aliases = append(aliases, n.Alias)
+		l := fmt.Sprintf("%s  [%s]", n.Alias, nodeModeLabel(n))
+		labels = append(labels, l)
+		byLabel[l] = n.Alias
 	}
 	var selected string
-	survey.AskOne(&survey.Select{Message: prompt, Options: aliases}, &selected)
+	ask(&survey.Select{Message: prompt, Options: labels}, &selected)
 	for _, n := range cfg.ForeignNodes {
-		if n.Alias == selected {
+		if n.Alias == byLabel[selected] {
 			return n, true
 		}
 	}

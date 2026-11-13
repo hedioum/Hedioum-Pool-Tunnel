@@ -30,7 +30,7 @@ func runSetupWizard() *config.AppConfig {
 		Message: "Define the network role of this server instance:",
 		Options: []string{"Foreign Egress Node (Target)", "Iran Hub Node (Ingress)"},
 	}
-	survey.AskOne(prompt, &role)
+	ask(prompt, &role)
 
 	cfg := &config.AppConfig{}
 
@@ -58,7 +58,7 @@ func setupForeignNode(cfg *config.AppConfig) {
 	detectedIP, _ := sysutil.GetPublicIPv4()
 
 	var ip string
-	survey.AskOne(&survey.Input{
+	ask(&survey.Input{
 		Message: "Confirm Server Public IPv4:",
 		Default: detectedIP,
 	}, &ip, survey.WithValidator(survey.Required))
@@ -67,7 +67,7 @@ func setupForeignNode(cfg *config.AppConfig) {
 	// custom mimic set. The token is generated now so it can seed the persona.
 	token := sysutil.GenerateSecureToken()
 	var personaChoice string
-	survey.AskOne(&survey.Select{
+	ask(&survey.Select{
 		Message: "Server persona (shapes the whole on-wire footprint):",
 		Options: append([]string{"auto (recommended)"}, append(persona.Names(), "custom (choose mimics)")...),
 		Default: "auto (recommended)",
@@ -97,18 +97,18 @@ func setupForeignNode(cfg *config.AppConfig) {
 	decoyPort := 2022
 	if containsStr(mimics, "ssh") {
 		var listenPortStr string
-		survey.AskOne(&survey.Input{Message: "SSH mimic public port:", Default: "22"}, &listenPortStr)
+		ask(&survey.Input{Message: "SSH mimic public port:", Default: "22"}, &listenPortStr)
 		listenPort = clampPort(listenPortStr, 22)
 		if listenPort != 22 {
 			color.Yellow("[!] SSH mimic on port %d: it is most convincing on 22.", listenPort)
 		}
 
 		var decoyPortStr string
-		survey.AskOne(&survey.Input{Message: "Decoy sshd port (OpenSSH is moved here):", Default: "2022"}, &decoyPortStr)
+		ask(&survey.Input{Message: "Decoy sshd port (OpenSSH is moved here):", Default: "2022"}, &decoyPortStr)
 		decoyPort = clampPort(decoyPortStr, 2022)
 
 		changeSSH := false
-		survey.AskOne(&survey.Confirm{
+		ask(&survey.Confirm{
 			Message: fmt.Sprintf("Move OpenSSH to port %d to free port %d for the SSH mimic?", decoyPort, listenPort),
 			Default: true,
 		}, &changeSSH)
@@ -141,13 +141,13 @@ func setupForeignNode(cfg *config.AppConfig) {
 	cfg.EgressIPMode = "ipv4"
 	if v6, err := sysutil.GetPublicIPv6(); err == nil && v6 != "" {
 		enableV6 := false
-		survey.AskOne(&survey.Confirm{
+		ask(&survey.Confirm{
 			Message: fmt.Sprintf("Detected IPv6 (%s). Allow outbound traffic over IPv6 too?", v6),
 			Default: false,
 		}, &enableV6)
 		if enableV6 {
 			var mode string
-			survey.AskOne(&survey.Select{
+			ask(&survey.Select{
 				Message: "Egress IP mode:",
 				Options: []string{"Dual (prefer IPv4, fall back to IPv6)", "IPv6 only"},
 			}, &mode)
@@ -165,11 +165,11 @@ func setupForeignNode(cfg *config.AppConfig) {
 	color.White("  Encrypt certificate — far harder to fingerprint than a self-signed one.")
 	color.White("  Without a domain everything still works, using a self-signed certificate.")
 	domain := ""
-	survey.AskOne(&survey.Input{Message: "Domain for a real certificate (blank = self-signed):"}, &domain)
+	ask(&survey.Input{Message: "Domain for a real certificate (blank = self-signed):"}, &domain)
 	cfg.Domain = strings.TrimSpace(domain)
 	if cfg.Domain != "" {
 		email := ""
-		survey.AskOne(&survey.Input{Message: "Let's Encrypt account email (optional):"}, &email)
+		ask(&survey.Input{Message: "Let's Encrypt account email (optional):"}, &email)
 		cfg.ACMEEmail = strings.TrimSpace(email)
 	} else {
 		color.Yellow("  [!] Using a self-signed certificate. A domain is recommended when possible.")
@@ -177,7 +177,7 @@ func setupForeignNode(cfg *config.AppConfig) {
 
 	// Web-decoy style shown to unauthorized probes on the plain web ports.
 	decoyStyle := ""
-	survey.AskOne(&survey.Select{
+	ask(&survey.Select{
 		Message: "Web-decoy style for unauthorized probes:",
 		Options: []string{"apache (Apache default page)", "directadmin (DirectAdmin hosting box)"},
 		Default: "apache (Apache default page)",
@@ -308,7 +308,7 @@ func setupIranNode(cfg *config.AppConfig, isFirstTime bool) {
 	var mimicTypes []string
 	if !fromToken {
 		hubPersonaChoice := ""
-		survey.AskOne(&survey.Select{
+		ask(&survey.Select{
 			Message: "Match the foreign's mimic set (tip: paste the v2 pairing token instead to skip this):",
 			Options: append([]string{"auto (from token)"}, append(persona.Names(), "custom (choose mimics)")...),
 			Default: "auto (from token)",
@@ -343,7 +343,7 @@ func setupIranNode(cfg *config.AppConfig, isFirstTime bool) {
 	// used by policy routing / a downstream router — not just as a SOCKS proxy. It is
 	// opt-in and never becomes the host default route.
 	enableTun := false
-	survey.AskOne(&survey.Confirm{
+	ask(&survey.Confirm{
 		Message: "Also expose this node as a TUN network interface? (advanced; SOCKS always stays on)",
 		Default: false,
 		Help:    "Adds a virtual interface (e.g. hedioum0 @ 10.200.0.1/24) whose traffic egresses through this node. Leave off for a plain SOCKS-only node.",
@@ -351,9 +351,9 @@ func setupIranNode(cfg *config.AppConfig, isFirstTime bool) {
 	if enableTun {
 		autoName, autoAddr := nextFreeTun(cfg)
 		tunName := autoName
-		survey.AskOne(&survey.Input{Message: "TUN interface name:", Default: autoName}, &tunName)
+		ask(&survey.Input{Message: "TUN interface name:", Default: autoName}, &tunName)
 		tunAddr := autoAddr
-		survey.AskOne(&survey.Input{
+		ask(&survey.Input{
 			Message: "TUN gateway CIDR:", Default: autoAddr,
 			Help: "The .1 host becomes this node's gateway IP; the /24 must not overlap the hub's existing LANs.",
 		}, &tunAddr)
@@ -362,7 +362,7 @@ func setupIranNode(cfg *config.AppConfig, isFirstTime bool) {
 			tunAddr = autoAddr
 		}
 		enableDNS := false
-		survey.AskOne(&survey.Confirm{
+		ask(&survey.Confirm{
 			Message: fmt.Sprintf("Run a DNS forwarder on %s:53 (resolves through the tunnel)?", tunGatewayIP(tunAddr)),
 			Default: false,
 			Help:    "For gateway/router clients that need a leak-free resolver on the tunnel's own address.",
@@ -378,7 +378,7 @@ func setupIranNode(cfg *config.AppConfig, isFirstTime bool) {
 
 		// Gateway mode: make this a transparent L3 gateway (for MikroTik/router use).
 		enableGW := false
-		survey.AskOne(&survey.Confirm{
+		ask(&survey.Confirm{
 			Message: "Transparent gateway mode? (forward LAN transit into the tunnel — for MikroTik/router)",
 			Default: false,
 			Help:    "Turns this node into a WireGuard-like egress interface: the router marks traffic and routes it here. Off = TUN/SOCKS only.",
@@ -556,7 +556,7 @@ func promptMimicsWithDefault(def []string) []string {
 		def = []string{"ssh", "tls"}
 	}
 	var sel []string
-	survey.AskOne(&survey.MultiSelect{
+	ask(&survey.MultiSelect{
 		Message: "Select camouflage protocols (Space toggles, Enter confirms):",
 		Options: append([]string{allOpt}, allMimics...),
 		Default: def,
