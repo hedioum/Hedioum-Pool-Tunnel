@@ -29,7 +29,7 @@ func TestHandleUDPStreamRelay(t *testing.T) {
 	}()
 
 	orig := dialUDP
-	dialUDP = func(string) (*net.UDPConn, error) {
+	dialUDP = func(string) (net.Conn, error) {
 		return net.DialUDP("udp", nil, echo.LocalAddr().(*net.UDPAddr))
 	}
 	defer func() { dialUDP = orig }()

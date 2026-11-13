@@ -43,6 +43,11 @@ func cmdProbe(args []string) {
 
 	anyFail := false
 	for _, n := range nodes {
+		if n.Reverse {
+			color.Yellow("\nNode %q is in reverse mode: the foreign dials in, so there is nothing to probe from here.", n.Alias)
+			color.Yellow("  Look for \"reverse pipe established\" in: journalctl -u hedioum.service")
+			continue
+		}
 		fmt.Printf("\nNode %q (%d endpoints):\n", n.Alias, len(n.Endpoints))
 		for _, ep := range n.Endpoints {
 			rtt, err := ingress.ProbeEndpoint(ep, n.AuthToken)

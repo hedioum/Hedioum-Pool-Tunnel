@@ -58,7 +58,14 @@ func testNodeConnection(n config.ForeignNode) {
 	// 1. Per-mimic reachability (the tunnel handshake end-to-end).
 	color.HiWhite(" Endpoints (probe):")
 	reachable := 0
-	for _, ep := range n.Endpoints {
+	endpoints := n.Endpoints
+	if n.Reverse {
+		// The foreign dials in: there is no endpoint for the hub to probe. The SOCKS
+		// egress test below still proves the reverse pipes work end to end.
+		color.HiBlack("   (reverse mode: the foreign dials in; skipping per-endpoint probes)")
+		endpoints = nil
+	}
+	for _, ep := range endpoints {
 		rtt, err := ingress.ProbeEndpoint(ep, n.AuthToken)
 		if err != nil {
 			color.Red("   ✗ %-11s %-24s FAILED (%v)", ep.Mimic, ep.Target, compactErr(err))
@@ -67,11 +74,13 @@ func testNodeConnection(n config.ForeignNode) {
 		color.Green("   ✓ %-11s %-24s OK (%d ms)", ep.Mimic, ep.Target, rtt.Milliseconds())
 		reachable++
 	}
-	if reachable == 0 {
+	if reachable == 0 && !n.Reverse {
 		color.Red(" [x] No endpoint is reachable — the tunnel cannot come up. Check the foreign and firewall.")
 		return
 	}
-	color.HiBlack("   %d/%d endpoints reachable.", reachable, len(n.Endpoints))
+	if !n.Reverse {
+		color.HiBlack("   %d/%d endpoints reachable.", reachable, len(n.Endpoints))
+	}
 
 	// 2. SOCKS egress (always on). Reach the listener on loopback unless it is bound
 	// to a specific non-loopback address (e.g. a container veth IP), in which case

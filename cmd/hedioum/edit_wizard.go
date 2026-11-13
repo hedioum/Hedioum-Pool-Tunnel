@@ -6,10 +6,43 @@ import (
 	"strings"
 
 	"github.com/AlecAivazis/survey/v2"
+	"github.com/AlecAivazis/survey/v2/terminal"
 	"github.com/fatih/color"
 	"github.com/hedioum/Hedioum-Pool-Tunnel/config"
 	"github.com/hedioum/Hedioum-Pool-Tunnel/internal/sysutil"
 )
+
+// wizardCancelled is raised by ask when the operator presses Ctrl+C inside a multi-prompt
+// wizard, so the whole wizard stops (nothing is saved) instead of the keypress being
+// swallowed and the next prompt appearing.
+type wizardCancelled struct{}
+
+var wizardDepth int
+
+// ask is survey.AskOne that cancels the running wizard on Ctrl+C. Outside a cancellable
+// wizard it behaves like survey.AskOne.
+func ask(p survey.Prompt, resp interface{}, opts ...survey.AskOpt) {
+	if err := survey.AskOne(p, resp, opts...); err == terminal.InterruptErr && wizardDepth > 0 {
+		panic(wizardCancelled{})
+	}
+}
+
+// cancellable runs a wizard and reports whether the operator cancelled it with Ctrl+C.
+func cancellable(fn func()) (cancelled bool) {
+	wizardDepth++
+	defer func() {
+		wizardDepth--
+		if r := recover(); r != nil {
+			if _, ok := r.(wizardCancelled); ok {
+				cancelled = true
+				return
+			}
+			panic(r)
+		}
+	}()
+	fn()
+	return false
+}
 
 // --- interactive edit helpers (every prompt pre-fills the current value; Enter keeps it) ---
 
@@ -25,7 +58,7 @@ func splitCSV(s string) []string {
 
 func promptIntDefault(msg string, def int) int {
 	var s string
-	survey.AskOne(&survey.Input{Message: msg, Default: strconv.Itoa(def)}, &s)
+	ask(&survey.Input{Message: msg, Default: strconv.Itoa(def)}, &s)
 	if v, err := strconv.Atoi(strings.TrimSpace(s)); err == nil {
 		return v
 	}
@@ -36,19 +69,19 @@ func promptIntDefault(msg string, def int) int {
 // within 1..65535 (blank keeps the default).
 func promptPortDefault(msg string, def int) int {
 	s := strconv.Itoa(def)
-	survey.AskOne(&survey.Input{Message: msg, Default: s}, &s, survey.WithValidator(validatePortInput))
+	ask(&survey.Input{Message: msg, Default: s}, &s, survey.WithValidator(validatePortInput))
 	return clampPort(s, def)
 }
 
 func promptStrDefault(msg, def string) string {
 	v := def
-	survey.AskOne(&survey.Input{Message: msg, Default: def}, &v)
+	ask(&survey.Input{Message: msg, Default: def}, &v)
 	return strings.TrimSpace(v)
 }
 
 func selectDefault(msg string, opts []string, def string) string {
 	var v string
-	survey.AskOne(&survey.Select{Message: msg, Options: opts, Default: def}, &v)
+	ask(&survey.Select{Message: msg, Options: opts, Default: def}, &v)
 	if v == "" {
 		return def
 	}
@@ -58,7 +91,7 @@ func selectDefault(msg string, opts []string, def string) string {
 // promptTokenChange asks whether to rotate the auth token; keeps the current one on No.
 func promptTokenChange(current string) (string, bool) {
 	change := false
-	survey.AskOne(&survey.Confirm{Message: "Change (rotate) the auth token?", Default: false}, &change)
+	ask(&survey.Confirm{Message: "Change (rotate) the auth token?", Default: false}, &change)
 	if !change {
 		return current, false
 	}
@@ -67,8 +100,11 @@ func promptTokenChange(current string) (string, bool) {
 
 // editIranNode re-asks each add-node question for an existing node, pre-filled with
 // its current values, and updates it in place.
-func editIranNode(cfg *config.AppConfig, node config.ForeignNode) {
+func editIranNode(cfg *config.AppConfig, node config.ForeignNode) (restarted bool) {
 	color.HiBlue("\n--- Edit Node %q (press Enter to keep the current value) ---\n", node.Alias)
+	if node.Reverse {
+		return editReverseIranNode(cfg, node)
+	}
 	ports := currentNodePorts(node)
 
 	ip := promptStrDefault("Foreign Egress IP/host:", nodeTargetIP(node))
@@ -88,17 +124,80 @@ func editIranNode(cfg *config.AppConfig, node config.ForeignNode) {
 		color.Yellow("[!] New token: %s — update the foreign server to match.", tok)
 	}
 
-	cfg.UpdateForeignNode(config.ForeignNode{
-		Alias:               node.Alias,
-		LocalSocksPort:      socks,
-		AuthToken:           tok,
-		Endpoints:           buildEndpoints(ip, types, portMap, sni),
-		MinConnections:      minC,
-		MaxConnections:      maxC,
-		BandwidthLimitMbps:  bw,
-		BandwidthJitterMbps: jit,
-	})
+	n := nodeWithCommonEdits(node, socks, minC, maxC, bw, jit, tok)
+	n.Endpoints = buildEndpoints(ip, types, portMap, sni)
+	cfg.UpdateForeignNode(n)
 	color.Green("[✓] Node %q updated (target %s, mimics: %s).", node.Alias, ip, strings.Join(types, ","))
+	return false
+}
+
+// nodeWithCommonEdits returns the node with the settings both modes share changed and
+// every other field (reverse listeners, front proxy, sharing...) left exactly as it was.
+func nodeWithCommonEdits(node config.ForeignNode, socks, minC, maxC, bw, jit int, tok string) config.ForeignNode {
+	node.LocalSocksPort = socks
+	node.MinConnections = minC
+	node.MaxConnections = maxC
+	node.BandwidthLimitMbps = bw
+	node.BandwidthJitterMbps = jit
+	node.AuthToken = tok
+	return node
+}
+
+// editReverseIranNode edits a node that is in reverse mode. The foreign's address,
+// mimic types and ports do not apply (the foreign dials the hub), so they are not asked.
+// The settings that do apply (SOCKS port, speed cap, token, then listener ports, SNI,
+// decoy, front proxy and pipes) are all here. It reports whether it already saved and
+// restarted the service. Switching between normal and reverse stays in its own entry.
+func editReverseIranNode(cfg *config.AppConfig, node config.ForeignNode) (restarted bool) {
+	color.HiCyan("This node is in REVERSE mode: the foreign dials this hub, so the foreign's address, mimics")
+	color.HiCyan("and ports are not used. Current reverse settings:")
+	printReverseSummary(node)
+	fmt.Println()
+	socks := promptPortDefault("Local SOCKS5 bind port:", node.LocalSocksPort)
+	bw := promptIntDefault("Per-connection Mbps cap:", node.BandwidthLimitMbps)
+	jit := promptIntDefault("Bandwidth jitter Mbps:", node.BandwidthJitterMbps)
+	tok, changed := promptTokenChange(node.AuthToken)
+	if changed {
+		color.Yellow("[!] New token: %s — update the foreign server to match.", tok)
+	}
+	cfg.UpdateForeignNode(nodeWithCommonEdits(node, socks, node.MinConnections, node.MaxConnections, bw, jit, tok))
+
+	var more bool
+	ask(&survey.Confirm{Message: "Change the reverse settings too (listener ports, SNI, decoy, front proxy, pipes)?", Default: false}, &more)
+	if !more {
+		return false
+	}
+	before := commitCount
+	reverseNodeFlow(cfg, node.Alias, true)
+	return commitCount != before
+}
+
+// printReverseSummary prints what a reverse node is configured with.
+func printReverseSummary(n config.ForeignNode) {
+	for _, l := range n.ReverseListeners {
+		fmt.Printf("  listener   %-10s port %d\n", l.Type, l.Port)
+	}
+	if len(n.ReverseListeners) > 0 && n.ReverseListeners[0].ServerName != "" {
+		fmt.Printf("  SNI        %s\n", n.ReverseListeners[0].ServerName)
+	}
+	if n.ReverseBind != "" {
+		fmt.Printf("  bind       %s\n", n.ReverseBind)
+	}
+	if n.ReverseProxyProtocol {
+		fmt.Printf("  PROXY protocol required\n")
+	}
+	for ty, p := range n.ReverseAdvertise {
+		fmt.Printf("  the foreign dials %s on port %d (front proxy)\n", ty, p)
+	}
+	if n.ReverseShareWith != "" {
+		fmt.Printf("  shares the listener of %q\n", n.ReverseShareWith)
+	}
+	if n.ReverseDecoyStyle != "" {
+		fmt.Printf("  decoy      %s\n", n.ReverseDecoyStyle)
+	}
+	if n.MinConnections > 0 {
+		fmt.Printf("  pipes      %d-%d\n", n.MinConnections, n.MaxConnections)
+	}
 }
 
 // editForeignConfig re-asks each foreign setup question, pre-filled with the current

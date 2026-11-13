@@ -29,6 +29,24 @@ func runSubcommand(name string, args []string) {
 		cmdRemoveNode(args)
 	case "edit-foreign":
 		cmdEditForeign(args)
+	case "add-hub":
+		cmdAddHub(args)
+	case "edit-hub":
+		cmdEditHub(args)
+	case "remove-hub":
+		cmdRemoveHub(args)
+	case "list-hubs":
+		cmdListHubs(args)
+	case "reverse-shared-auth":
+		cmdReverseSharedAuth(args)
+	case "front-proxy":
+		cmdFrontProxy(args)
+	case "pairing-token":
+		cmdPairingToken(args)
+	case "reverse-iran":
+		cmdReverseIran(args)
+	case "reverse-foreign":
+		cmdReverseForeign(args)
 	case "install":
 		cmdInstall(args)
 	case "uninstall":
@@ -64,7 +82,7 @@ Usage:
 
   hedioum-tunnel setup-foreign [flags]   Write the foreign (egress) config
       --listen-port N (default 22)  --decoy-port N (default 2022)
-      --egress-mode ipv4|ipv6|dual  --egress-bind-ip IP  --move-ssh  --token HEX
+      --egress-mode ipv4|ipv6|dual  --egress-bind-ip IP  --egress-upstream HOST:PORT  --move-ssh  --token HEX
 
   hedioum-tunnel edit-foreign [flags]    Edit the foreign config in place (only the
       flags you pass change; token kept unless --token/--rotate-token)
@@ -79,6 +97,29 @@ Usage:
   hedioum-tunnel edit-node --alias NAME [flags]  Edit a node in place (only the flags
       you pass change; token kept unless --token/--rotate-token)
   hedioum-tunnel remove-node --alias NAME
+  hedioum-tunnel front-proxy [--alias NAME] [--kind nginx|haproxy] [--public-port 443] [--source-ips IP,IP]
+      Print the nginx/HAProxy config that routes the tunnel's SNI to its listener, so the tunnel
+      can share a port such as 443 with a panel or user configs: on a foreign, its own listener
+      (pair it with edit-foreign --advertise-ports TYPE=443 --bind 127.0.0.1 [--proxy-protocol]);
+      on the hub, the reverse node --alias NAME. --source-ips (or --by-source on the hub) routes
+      the tunnel peers by address so the tunnel can share an SNI with a real service
+  hedioum-tunnel pairing-token [--public-ip IP]
+      (foreign) Print the paste-only pairing token for the hub, honoring --advertise-ports
+  hedioum-tunnel reverse-iran --alias NAME [--ports tls=443,...] [--all-mimics] [--public-ip IP] [--forward]
+      Flip an existing node to REVERSE mode (the foreign dials the hub instead of the hub
+      dialing the foreign) and print a reverse pairing token; --forward flips it back
+      Behind nginx/HAProxy on a shared port: --sni NAME --advertise-ports TYPE=443
+      --bind 127.0.0.1 [--proxy-protocol]  (settings are remembered per node)
+  hedioum-tunnel add-hub --token T [--name N] [--min 12] [--max 24] (foreign, reverse mode)
+      Dial one more Iran hub with its own pipe range: at least --min pipes always, up to
+      --max under load. Also: edit-hub --name N [--min --max], remove-hub --name N, list-hubs.
+      Bandwidth/jitter stay on each hub's node (edit-node there).
+  hedioum-tunnel reverse-shared-auth [--on|--off]
+      Advanced (hub, default off): let several reverse nodes share ONE listener / SNI; the
+      hub tells them apart by token. Join a node with reverse-iran --alias NEW --share-with OLD
+  hedioum-tunnel reverse-foreign --token REVERSE_TOKEN [--conns N] [--keep-listeners] [--forward]
+      Make this foreign dial out to the hub (paste the token from reverse-iran);
+      --forward restores the normal inbound mode
   hedioum-tunnel speedtest [--node NAME] [--mimic ssh|tls] [--seconds N] [--dir down|up|both]
   hedioum-tunnel probe     [--node NAME]    Test each endpoint (mimic) and report reachability
   hedioum-tunnel check-ip                   Report the egress IP's reputation (clean vs flagged)

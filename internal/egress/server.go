@@ -14,6 +14,7 @@ import (
 	"github.com/hashicorp/yamux"
 	"github.com/hedioum/Hedioum-Pool-Tunnel/config"
 	"github.com/hedioum/Hedioum-Pool-Tunnel/internal/mimic"
+	"github.com/hedioum/Hedioum-Pool-Tunnel/internal/proxyproto"
 	"github.com/hedioum/Hedioum-Pool-Tunnel/internal/securestream"
 	"github.com/hedioum/Hedioum-Pool-Tunnel/internal/sysutil"
 	"github.com/hedioum/Hedioum-Pool-Tunnel/internal/tlscert"
@@ -47,7 +48,20 @@ func StartForeignDaemon(cfg *config.AppConfig) {
 	if cfg.EgressBindIP != "" {
 		egressBindIP = net.ParseIP(cfg.EgressBindIP)
 	}
+	if cfg.EgressUpstream != "" {
+		egressUpstream = cfg.EgressUpstream
+		slog.Info("egress hands traffic to a SOCKS5 upstream (egress_ip_mode / egress_bind_ip no longer apply)", "upstream", egressUpstream)
+	}
 	slog.Info("egress starting", "egress_mode", egressMode, "mimics", len(cfg.Mimics), "decoy_style", cfg.DecoyStyle, "domain", cfg.Domain)
+
+	// Reverse tunnel: dial out to the Iran hub (see reverse.go). In reverse-only mode
+	// no inbound listener is opened.
+	StartReverseDialOut(cfg)
+	if cfg.ReverseOnly {
+		slog.Info("egress running in reverse-only mode (no inbound listeners)")
+		sysutil.WaitForTerminationSignal()
+		return
+	}
 
 	// One certificate manager for the whole daemon: a real Let's Encrypt cert (ACME)
 	// when a domain is configured and points here, otherwise self-signed. Shared by
@@ -98,6 +112,10 @@ func startHTTPServer(port int, certMgr *tlscert.CertManager, cfg *config.AppConf
 	}
 }
 
+// proxyHeaderTimeout bounds how long a connection from the front proxy may take to send
+// its PROXY header.
+const proxyHeaderTimeout = 5 * time.Second
+
 // startMimicListener binds one port and serves it with the given mimic.
 func startMimicListener(cfg *config.AppConfig, ml config.MimicListener, filter *securestream.ReplayFilter, certMgr *tlscert.CertManager) {
 	m, err := buildServerMimic(cfg, ml, filter, certMgr)
@@ -106,21 +124,45 @@ func startMimicListener(cfg *config.AppConfig, ml config.MimicListener, filter *
 		return
 	}
 
-	// Dual-stack listen (":port") so an Iran hub can reach us over IPv4 or IPv6.
-	listenAddr := fmt.Sprintf(":%d", ml.Port)
+	// Dual-stack listen (":port") so an Iran hub can reach us over IPv4 or IPv6, unless this
+	// listener sits behind a front proxy (cfg.ListenBind, e.g. 127.0.0.1). Only the mimic
+	// types chosen for the proxy are bound to it; the others, and the SSH mimic (a proxy
+	// cannot route SSH, there is no SNI), keep their public port.
+	proxied := cfg.FrontProxied(ml.Type)
+	bind := ""
+	if proxied {
+		bind = cfg.ListenBind
+	}
+	listenAddr := net.JoinHostPort(bind, strconv.Itoa(ml.Port))
 	listener, err := net.Listen("tcp", listenAddr)
 	if err != nil {
 		slog.Error("failed to bind mimic listener", "type", ml.Type, "addr", listenAddr, "err", err)
 		return
 	}
-	slog.Info("mimic listener active", "type", ml.Type, "addr", listenAddr)
+	// Behind a front proxy that sends the PROXY protocol, take the real client address
+	// from its header and drop anything that did not come through the proxy. Listeners
+	// that are not behind the proxy are left alone.
+	requireProxy := cfg.ProxyProtocol && proxied
+	slog.Info("mimic listener active", "type", ml.Type, "addr", listenAddr, "proxy_protocol", requireProxy)
 
 	for {
 		conn, err := listener.Accept()
 		if err != nil {
 			continue
 		}
-		go handleIncomingConnection(conn, m, ml.Type)
+		if !requireProxy {
+			go handleIncomingConnection(conn, m, ml.Type)
+			continue
+		}
+		go func(conn net.Conn) {
+			c, err := proxyproto.Accept(conn, proxyHeaderTimeout)
+			if err != nil {
+				slog.Debug("dropped a connection without a PROXY header", "type", ml.Type, "err", err)
+				conn.Close()
+				return
+			}
+			handleIncomingConnection(c, m, ml.Type)
+		}(conn)
 	}
 }
 
@@ -393,26 +435,34 @@ var errBlockedTarget = errors.New("blocked non-global target")
 // TOCTOU, and it fails closed on resolution errors. Returns the IP and whether it
 // is IPv4.
 func vetted(host string) (net.IP, bool, error) {
-	// IP literal.
+	ips, err := vetHost(host)
+	if err != nil {
+		return nil, false, err
+	}
+	return pickFamily(ips, host)
+}
+
+// vetHost applies the SSRF policy to a destination: an IP literal must be a public
+// address, and a hostname is resolved once and rejected if ANY answer is non-global
+// (defends against split-horizon answers mixing public + internal). It returns the
+// vetted addresses. It fails closed on resolution errors.
+func vetHost(host string) ([]net.IP, error) {
 	if ip := net.ParseIP(host); ip != nil {
 		if !isDialableIP(ip) {
-			return nil, false, fmt.Errorf("%w %s", errBlockedTarget, host)
+			return nil, fmt.Errorf("%w %s", errBlockedTarget, host)
 		}
-		return pickFamily([]net.IP{ip}, host)
+		return []net.IP{ip}, nil
 	}
-
-	// Hostname: resolve once; reject the whole target if ANY resolved address is
-	// non-global (defends against split-horizon answers mixing public + internal).
 	ips, err := net.LookupIP(host)
 	if err != nil {
-		return nil, false, fmt.Errorf("resolve %s: %w", host, err)
+		return nil, fmt.Errorf("resolve %s: %w", host, err)
 	}
 	for _, ip := range ips {
 		if !isDialableIP(ip) {
-			return nil, false, fmt.Errorf("%w %s (%s)", errBlockedTarget, host, ip)
+			return nil, fmt.Errorf("%w %s (%s)", errBlockedTarget, host, ip)
 		}
 	}
-	return pickFamily(ips, host)
+	return ips, nil
 }
 
 // pickFamily selects a vetted IP honoring the egress family mode. In "dual" and
@@ -464,6 +514,14 @@ func safeDialTarget(target string) (net.Conn, error) {
 	if err != nil {
 		return nil, fmt.Errorf("invalid target %q: %w", target, err)
 	}
+	if egressUpstream != "" {
+		// The proxy does the dialing (and the family choice); we still refuse internal
+		// targets, and pass the name through so its domain rules can match.
+		if _, err := vetHost(host); err != nil {
+			return nil, err
+		}
+		return socksDialTCP(egressUpstream, host, port)
+	}
 	ip, isV4, err := vetted(host)
 	if err != nil {
 		return nil, err
@@ -478,10 +536,16 @@ func safeDialTarget(target string) (net.Conn, error) {
 
 // safeDialUDP vets the UDP target and returns a connected UDP socket to the exact
 // vetted IP (same SSRF policy as TCP; connected so only the target can reply).
-func safeDialUDP(target string) (*net.UDPConn, error) {
+func safeDialUDP(target string) (net.Conn, error) {
 	host, port, err := net.SplitHostPort(target)
 	if err != nil {
 		return nil, fmt.Errorf("invalid target %q: %w", target, err)
+	}
+	if egressUpstream != "" {
+		if _, err := vetHost(host); err != nil {
+			return nil, err
+		}
+		return socksDialUDP(egressUpstream, host, port)
 	}
 	ip, isV4, err := vetted(host)
 	if err != nil {

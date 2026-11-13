@@ -43,6 +43,9 @@ func cmdSpeedtest(args []string) {
 			fail("node %q not found", *nodeAlias)
 		}
 	}
+	if node.Reverse {
+		fail("speedtest opens its own connection to the foreign, which does not apply to reverse node %q (the foreign dials in)", node.Alias)
+	}
 	ep := node.Endpoints[0]
 	if *mimicSel != "" {
 		found := false
