@@ -120,12 +120,14 @@ func startMimicListener(cfg *config.AppConfig, ml config.MimicListener, filter *
 		return
 	}
 
-	// Dual-stack listen (":port") so an Iran hub can reach us over IPv4 or IPv6, unless a
-	// front proxy is configured (cfg.ListenBind, e.g. 127.0.0.1). The SSH mimic is never
-	// bound to it: a proxy cannot route SSH (there is no SNI), so it keeps its public port.
-	bind := cfg.ListenBind
-	if ml.Type == "ssh" {
-		bind = ""
+	// Dual-stack listen (":port") so an Iran hub can reach us over IPv4 or IPv6, unless this
+	// listener sits behind a front proxy (cfg.ListenBind, e.g. 127.0.0.1). Only the mimic
+	// types chosen for the proxy are bound to it; the others, and the SSH mimic (a proxy
+	// cannot route SSH, there is no SNI), keep their public port.
+	proxied := cfg.FrontProxied(ml.Type)
+	bind := ""
+	if proxied {
+		bind = cfg.ListenBind
 	}
 	listenAddr := net.JoinHostPort(bind, strconv.Itoa(ml.Port))
 	listener, err := net.Listen("tcp", listenAddr)
@@ -134,9 +136,9 @@ func startMimicListener(cfg *config.AppConfig, ml config.MimicListener, filter *
 		return
 	}
 	// Behind a front proxy that sends the PROXY protocol, take the real client address
-	// from its header and drop anything that did not come through the proxy. The SSH
-	// mimic is not a TLS service a proxy can route by SNI, so it is left alone.
-	requireProxy := cfg.ProxyProtocol && ml.Type != "ssh"
+	// from its header and drop anything that did not come through the proxy. Listeners
+	// that are not behind the proxy are left alone.
+	requireProxy := cfg.ProxyProtocol && proxied
 	slog.Info("mimic listener active", "type", ml.Type, "addr", listenAddr, "proxy_protocol", requireProxy)
 
 	for {

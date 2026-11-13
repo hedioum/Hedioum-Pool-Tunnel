@@ -192,6 +192,9 @@ func cmdEditForeign(args []string) {
 	portsSpec := fs.String("ports", "", "set listener ports as TYPE=PORT,... (any mimic type)")
 	bind := fs.String("bind", cfg.ListenBind, "address the listeners bind to (127.0.0.1 behind a front proxy; '' = all interfaces)")
 	proxyProto := fs.Bool("proxy-protocol", cfg.ProxyProtocol, "require a PROXY protocol header from a front proxy (nginx proxy_protocol on / HAProxy send-proxy)")
+	fpAuto := fs.String("front-proxy-auto", "", "put these mimic types behind the front proxy in one step (comma list, or 'all'): each keeps its public port and listens locally on public+offset on 127.0.0.1")
+	fpOffset := fs.Int("front-proxy-offset", defaultFrontProxyOffset, "with --front-proxy-auto: local port = public port + this (8443 -> 48443)")
+	fpOff := fs.String("front-proxy-off", "", "take these mimic types out from behind the front proxy (comma list): they go back to their public port")
 	advertise := fs.String("advertise-ports", formatTypePorts(cfg.AdvertisePorts), "public ports a hub should dial as TYPE=PORT,... when a front proxy forwards them to the listeners")
 	_ = fs.Parse(args)
 	setFlags := map[string]bool{}
@@ -298,6 +301,20 @@ func cmdEditForeign(args []string) {
 	}
 	for _, w := range warns {
 		color.Yellow("[!] %s", w)
+	}
+	if *fpOff != "" {
+		if err := removeFrontProxy(cfg, strings.Split(*fpOff, ",")); err != nil {
+			fail("--front-proxy-off: %v", err)
+		}
+	}
+	if *fpAuto != "" {
+		autoWarns, err := autoFrontProxy(cfg, strings.Split(*fpAuto, ","), *fpOffset, *proxyProto)
+		if err != nil {
+			fail("--front-proxy-auto: %v", err)
+		}
+		for _, w := range autoWarns {
+			color.Yellow("[!] %s", w)
+		}
 	}
 
 	if err := config.SaveConfig(cfg); err != nil {

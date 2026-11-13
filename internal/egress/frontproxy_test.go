@@ -130,3 +130,39 @@ func TestSSHListenerIgnoresFrontProxyBind(t *testing.T) {
 		t.Fatal("the SSH listener must stay on all interfaces, not on the proxy's loopback address")
 	}
 }
+
+// Only the mimic types chosen for the front proxy are bound to it and require the PROXY
+// header. A listener that is not in AdvertisePorts stays public and plain.
+func TestOnlyChosenMimicsAreBehindTheProxy(t *testing.T) {
+	port := freeLoopbackPort(t)
+	cfg := &config.AppConfig{
+		Role: "foreign", AuthToken: frontProxyToken, DecoyStyle: "apache",
+		ListenBind: "127.0.0.1", ProxyProtocol: true,
+		AdvertisePorts: map[string]int{"smtps": 465}, // the tls listener below is NOT chosen
+	}
+	certMgr, err := tlscert.NewCertManager(t.TempDir(), "", "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	go startMimicListener(cfg, config.MimicListener{Type: "tls", Port: port}, securestream.NewReplayFilter(0), certMgr)
+	addr := net.JoinHostPort("127.0.0.1", strconv.Itoa(port))
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		c, err := net.DialTimeout("tcp", addr, 200*time.Millisecond)
+		if err == nil {
+			c.Close()
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("listener did not come up: %v", err)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if err := handshake(addr, false); err != nil {
+		t.Fatalf("an unchosen listener must keep working without a PROXY header: %v", err)
+	}
+	if l, err := net.Listen("tcp", net.JoinHostPort("127.0.0.2", strconv.Itoa(port))); err == nil {
+		l.Close()
+		t.Fatal("an unchosen listener must stay on all interfaces")
+	}
+}
